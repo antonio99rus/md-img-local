@@ -7,7 +7,7 @@ import mimetypes
 import os
 import re
 from pathlib import Path
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, urlsplit, unquote
 
 import requests
 
@@ -29,9 +29,89 @@ REF_DEF_RE = re.compile(
     re.MULTILINE,
 )
 
+VERSION = "1.1.0"
+
 # UA = "markdown-image-downloader/1.0"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
 
+PROXY_SCHEMES = ("http", "https", "socks4", "socks4a", "socks5", "socks5h")
+
+
+class ProxyConfigError(ValueError):
+    """Некорректный или неподдерживаемый адрес прокси."""
+
+
+def parse_proxy(raw: str | None) -> str | None:
+    """Проверяет адрес прокси из командной строки и нормализует схему."""
+    if raw is None:
+        return None
+    value = raw.strip()
+    if not value:
+        return None
+    if any(char.isspace() for char in value):
+        raise ProxyConfigError("адрес прокси не должен содержать пробелов")
+
+    parsed = urlsplit(value)
+    scheme = parsed.scheme.lower()
+    if scheme not in PROXY_SCHEMES:
+        raise ProxyConfigError(
+            f"неподдерживаемый адрес прокси {value!r}: ожидается схема "
+            f"{', '.join(PROXY_SCHEMES)}, например socks5://127.0.0.1:3066"
+        )
+    try:
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError as error:
+        raise ProxyConfigError(f"некорректный адрес прокси: {error}") from error
+    if not host:
+        raise ProxyConfigError("в адресе прокси не указан хост")
+    if port is None:
+        raise ProxyConfigError(
+            "в адресе прокси не указан порт, например socks5://127.0.0.1:3066"
+        )
+    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        raise ProxyConfigError("в адресе прокси допустимы только схема, хост и порт")
+
+    return f"{scheme}://{parsed.netloc}"
+
+
+def mask_proxy(proxy: str) -> str:
+    """Скрывает пароль прокси, чтобы он не попадал в вывод."""
+    parsed = urlsplit(proxy)
+    if parsed.username is None and parsed.password is None:
+        return proxy
+    auth = parsed.username or ""
+    if parsed.password is not None:
+        auth = f"{auth}:***" if auth else ":***"
+    host = parsed.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    if parsed.port is not None:
+        host = f"{host}:{parsed.port}"
+    return f"{parsed.scheme}://{auth}@{host}"
+
+
+def ensure_socks_support(proxy: str) -> None:
+    """SOCKS-прокси в requests работает только с установленным PySocks."""
+    if not urlsplit(proxy).scheme.startswith("socks"):
+        return
+    try:
+        import socks  # noqa: F401
+    except ImportError as error:
+        raise ProxyConfigError(
+            "для socks-прокси нужен PySocks: установите зависимости "
+            'командой "uv sync" или "pip install \'requests[socks]\'"'
+        ) from error
+
+
+def build_session(proxy: str | None) -> requests.Session:
+    session = requests.Session()
+    session.headers["User-Agent"] = UA
+    if proxy:
+        # Явно указанный прокси должен главенствовать над HTTP_PROXY/HTTPS_PROXY/NO_PROXY.
+        session.trust_env = False
+        session.proxies.update({"http": proxy, "https": proxy})
+    return session
 
 
 def extension_from_response(response: requests.Response, url: str) -> str:
@@ -58,9 +138,17 @@ def is_remote(url: str) -> bool:
 
 
 class Downloader:
-    def __init__(self, media_dir: Path, base_dir: Path) -> None:
+    def __init__(
+        self,
+        media_dir: Path,
+        base_dir: Path,
+        session: requests.Session,
+        proxy_label: str | None = None,
+    ) -> None:
         self.media_dir = media_dir
         self.base_dir = base_dir
+        self.session = session
+        self.proxy_label = proxy_label
         self.cache: dict[str, str] = {}
         self.downloaded = 0
         self.failed = 0
@@ -71,12 +159,14 @@ class Downloader:
         if url in self.cache:
             return self.cache[url]
         result = url
+        proxy_hint = (
+            f" (прокси {self.proxy_label} недоступен?)" if self.proxy_label else ""
+        )
         try:
-            response = requests.get(
+            response = self.session.get(
                 url,
                 verify=certifi.where(),
                 timeout=30,
-                headers={"User-Agent": UA},
             )
             response.raise_for_status()
             extension = extension_from_response(response, url)
@@ -89,7 +179,7 @@ class Downloader:
             print(f"[OK] {url} -> {relative}")
         except requests.RequestException as error:
             self.failed += 1
-            print(f"[ERROR] Не удалось скачать {url}: {error}")
+            print(f"[ERROR] Не удалось скачать {url}: {error}{proxy_hint}")
         except OSError as error:
             self.failed += 1
             print(f"[ERROR] Не удалось сохранить {url}: {error}")
@@ -113,7 +203,31 @@ def main() -> None:
         action="store_true",
         help="Не создавать резервную копию файла.md.orig",
     )
+    parser.add_argument(
+        "--proxy",
+        default=None,
+        metavar="URL",
+        help=(
+            "Прокси для скачивания: http, https, socks4, socks4a, socks5, socks5h "
+            "(порт обязателен), например socks5://127.0.0.1:3066. "
+            "При указании прокси переменные HTTP_PROXY, HTTPS_PROXY и NO_PROXY игнорируются"
+        ),
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {VERSION}",
+    )
     args = parser.parse_args()
+
+    try:
+        proxy = parse_proxy(args.proxy)
+        if proxy:
+            ensure_socks_support(proxy)
+    except ProxyConfigError as error:
+        parser.error(str(error))
+
+    proxy_label = mask_proxy(proxy) if proxy else None
 
     source_path = args.markdown.resolve()
     if not source_path.is_file():
@@ -126,7 +240,11 @@ def main() -> None:
     )
     media_dir.mkdir(parents=True, exist_ok=True)
 
-    downloader = Downloader(media_dir, source_path.parent)
+    if proxy_label:
+        print(f"[PROXY] {proxy_label}")
+
+    session = build_session(proxy)
+    downloader = Downloader(media_dir, source_path.parent, session, proxy_label)
     text = source_path.read_text(encoding="utf-8")
 
     found_urls: set[str] = set()
@@ -204,6 +322,8 @@ def main() -> None:
     print(f"Найдено уникальных изображений: {len(found_urls)}")
     print(f"Скачано: {downloader.downloaded}")
     print(f"Ошибок: {downloader.failed}")
+
+    session.close()
 
 
 if __name__ == "__main__":

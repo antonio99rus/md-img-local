@@ -1,0 +1,16 @@
+[project]
+name = "md-img-local"
+version = "1.1.0"
+description = "Скачивает изображения из Markdown-файла в media/ и заменяет ссылки на локальные"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = [
+    "certifi>=2023.7.22",
+    "requests[socks]>=2.31",
+    "truststore>=0.8",
+]
+
+[tool.uv]
+# Проект — одиночный скрипт, устанавливать его как пакет не нужно.
+package = false
