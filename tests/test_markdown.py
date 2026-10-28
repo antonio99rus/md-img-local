@@ -5,25 +5,7 @@ from pathlib import Path
 import pytest
 import requests
 
-from helpers import FakeResponse, FakeSession
-
-URL = "http://example.com/img.png"
-
-
-@pytest.fixture
-def fake_session(script, monkeypatch):
-    """Подменяет сессию и возвращает её вместе со списком переданных прокси."""
-
-    fake = FakeSession({URL: FakeResponse()})
-    proxies: list[str | None] = []
-
-    def build_session(proxy):
-        proxies.append(proxy)
-        return fake
-
-    monkeypatch.setattr(script, "build_session", build_session)
-    fake.proxies = proxies  # type: ignore[attr-defined]
-    return fake
+from helpers import URL, FakeResponse
 
 
 def write_md(tmp_path: Path, text: str, name: str = "note.md") -> Path:
@@ -124,7 +106,7 @@ def test_html_failed_download_keeps_tag(
     run_main(path)
 
     assert path.read_text(encoding="utf-8") == baseline
-    assert "Ошибок: 1" in capsys.readouterr().out
+    assert "Errors: 1" in capsys.readouterr().out
 
 
 def test_reference_with_local_url_untouched(script, run_main, tmp_path, fake_session):
@@ -149,7 +131,7 @@ def test_reference_failed_download_keeps_link(
     text = path.read_text(encoding="utf-8")
     assert "![a][pic]" in text
     assert f"[pic]: {URL}" in text
-    assert "Ошибок: 1" in capsys.readouterr().out
+    assert "Errors: 1" in capsys.readouterr().out
 
 
 def test_failed_download_keeps_link_and_counts_error(
@@ -163,7 +145,7 @@ def test_failed_download_keeps_link_and_counts_error(
     text = path.read_text(encoding="utf-8")
     output = capsys.readouterr().out
     assert text == f"![a]({URL})\n"
-    assert "Ошибок: 1" in output
+    assert "Errors: 1" in output
     assert "[ERROR]" in output
 
 
@@ -205,7 +187,7 @@ def test_missing_markdown_file(script, run_main, tmp_path, fake_session, capsys)
         run_main(tmp_path / "nope.md")
 
     assert error.value.code == 2
-    assert "файл не найден" in capsys.readouterr().err
+    assert "file not found" in capsys.readouterr().err
 
 
 def test_invalid_proxy_fails_before_any_work(
@@ -218,7 +200,7 @@ def test_invalid_proxy_fails_before_any_work(
         run_main(path, "--proxy=ftp://127.0.0.1:1080")
 
     assert error.value.code == 2
-    assert "неподдерживаемый" in capsys.readouterr().err
+    assert "unsupported" in capsys.readouterr().err
     assert path.read_text(encoding="utf-8") == original
     assert not path.with_name(f"{path.name}.orig").exists()
     assert fake_session.proxies == []
@@ -253,6 +235,6 @@ def test_report_counts(script, run_main, tmp_path, fake_session, capsys):
     run_main(path)
 
     output = capsys.readouterr().out
-    assert "Найдено уникальных изображений: 2" in output
-    assert "Скачано: 2" in output
-    assert "Ошибок: 0" in output
+    assert "Unique images found: 2" in output
+    assert "Downloaded: 2" in output
+    assert "Errors: 0" in output

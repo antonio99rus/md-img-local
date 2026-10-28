@@ -9,6 +9,8 @@ PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=="
 )
 
+URL = "http://example.com/img.png"
+
 
 class FakeResponse:
     def __init__(
@@ -32,6 +34,7 @@ class FakeSession:
     def __init__(self, responses: dict[str, object] | None = None) -> None:
         self.responses = dict(responses or {})
         self.calls: list[tuple[str, dict[str, object]]] = []
+        self.proxies: list[str | None] = []
         self.closed = False
 
     def get(self, url: str, **kwargs: object) -> FakeResponse:

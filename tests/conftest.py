@@ -7,6 +7,8 @@ from types import ModuleType
 
 import pytest
 
+from helpers import URL, FakeResponse, FakeSession
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = ROOT / "md-img-local.py"
 
@@ -20,6 +22,28 @@ def script() -> ModuleType:
     sys.modules["md_img_local"] = module
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture(autouse=True)
+def default_language(script: ModuleType, monkeypatch: pytest.MonkeyPatch):
+    """Фиксирует английский язык, чтобы тесты не зависели от локали машины."""
+    monkeypatch.setenv("MD_IMG_LOCAL_LANG", "en")
+    script.set_language("en")
+    yield
+    script.set_language("en")
+
+
+@pytest.fixture
+def fake_session(script: ModuleType, monkeypatch: pytest.MonkeyPatch) -> FakeSession:
+    """Подменяет сессию; запоминает, какой прокси передан в build_session()."""
+    fake = FakeSession({URL: FakeResponse()})
+
+    def build_session(proxy: str | None) -> FakeSession:
+        fake.proxies.append(proxy)
+        return fake
+
+    monkeypatch.setattr(script, "build_session", build_session)
+    return fake
 
 
 @pytest.fixture

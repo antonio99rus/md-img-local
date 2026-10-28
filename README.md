@@ -1,5 +1,7 @@
 # md-img-local
 
+[English version](README-EN-US.md)
+
 Скачивает изображения из Markdown-файла в `media/` (или указанный каталог) и заменяет ссылки на локальные.
 
 Поддерживаются три синтаксиса ссылок:
@@ -33,7 +35,7 @@ pip install "requests[socks]" certifi truststore
 ## Использование
 
 ```bash
-python md-img-local.py <файл.md> [--media КАТАЛОГ] [--no-backup] [--proxy URL]
+python md-img-local.py <файл.md> [--media КАТАЛОГ] [--no-backup] [--proxy URL] [--lang en|ru]
 ```
 
 | Аргумент | Описание |
@@ -42,6 +44,7 @@ python md-img-local.py <файл.md> [--media КАТАЛОГ] [--no-backup] [--p
 | `--media КАТАЛОГ` | Каталог для изображений; по умолчанию `media/` рядом с Markdown-файлом. |
 | `--no-backup` | Не создавать резервную копию `файл.md.orig`. |
 | `--proxy URL` | Скачивать через прокси, например `socks5://127.0.0.1:3066`. |
+| `--lang en\|ru` | Язык сообщений и справки; по умолчанию — локаль системы. |
 | `--version` | Показать версию программы. |
 
 Примеры:
@@ -71,6 +74,23 @@ python md-img-local.py note.md --proxy=http://user:password@proxy.example:3128
 - При ошибке соединения в сообщении появляется подсказка, что прокси может быть недоступен.
 - Прокси с подменой TLS-сертификатов (MITM) не поддерживается: проверка сертификатов идёт по `certifi`, поэтому для такого прокси потребуется собственный CA (пока не реализовано).
 
+## Локализация
+
+Сообщения и справка (`--help`) выводятся на русском или английском языке. Язык выбирается в таком порядке:
+
+1. `--lang ru|en`;
+2. переменная окружения `MD_IMG_LOCAL_LANG`;
+3. `LC_ALL`, `LC_MESSAGES`, `LANG`, `LANGUAGE`;
+4. локаль ОС (в Windows — язык интерфейса);
+5. если ничего не подошло — английский.
+
+```bash
+python md-img-local.py note.md --lang=en
+MD_IMG_LOCAL_LANG=ru python md-img-local.py note.md
+```
+
+Английская документация — в [README-EN-US.md](README-EN-US.md).
+
 ## Как это работает
 
 1. Markdown-файл переименовывается в `файл.md.orig` (если не указан `--no-backup`).
@@ -91,7 +111,7 @@ uv run pytest --cov    # запуск с отчётом о покрытии
 
 Без `uv`: `pip install pytest pytest-cov`, затем `pytest`.
 
-Тесты лежат в `tests/`: проверки разбора прокси, скачивания, замены ссылок (inline, reference-style, HTML), резервных копий, CLI и интеграционные сценарии с локальным HTTP-сервером и SOCKS5-прокси.
+Тесты лежат в `tests/` и проверяют разбор прокси, скачивание, замену ссылок (inline, reference-style, HTML), резервные копии, CLI, локализацию и интеграционные сценарии с локальным HTTP-сервером и SOCKS5-прокси.
 
 ## Лицензия
 

@@ -37,16 +37,16 @@ def test_parse_proxy_accepts_ipv6(script):
 @pytest.mark.parametrize(
     ("raw", "message"),
     [
-        ("socks5://127.0.0.1", "порт"),
-        ("socks5://:1080", "хост"),
-        ("socks5://127.0.0.1:99999", "некорректный"),
-        ("ftp://127.0.0.1:1080", "неподдерживаемый"),
-        ("127.0.0.1:3066", "схема"),
-        ("localhost:3066", "схема"),
-        ("socks5://127.0.0.1:1080/path", "только схема"),
-        ("socks5://127.0.0.1:1080?x=1", "только схема"),
-        ("socks5://127.0.0.1:1080#frag", "только схема"),
-        ("socks5://127.0.0.1:1080 x", "пробел"),
+        ("socks5://127.0.0.1", "port"),
+        ("socks5://:1080", "host"),
+        ("socks5://127.0.0.1:99999", "invalid"),
+        ("ftp://127.0.0.1:1080", "unsupported"),
+        ("127.0.0.1:3066", "scheme"),
+        ("localhost:3066", "scheme"),
+        ("socks5://127.0.0.1:1080/path", "only contain"),
+        ("socks5://127.0.0.1:1080?x=1", "only contain"),
+        ("socks5://127.0.0.1:1080#frag", "only contain"),
+        ("socks5://127.0.0.1:1080 x", "spaces"),
     ],
 )
 def test_parse_proxy_rejects_invalid(script, raw, message):

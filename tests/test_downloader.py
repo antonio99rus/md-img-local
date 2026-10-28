@@ -108,6 +108,7 @@ def test_localize_reports_connection_error_with_proxy_hint(script, tmp_path, cap
     assert downloader.failed == 1
     assert "[ERROR]" in output
     assert "socks5://127.0.0.1:3066" in output
+    assert "unreachable?" in output
 
 
 def test_localize_reports_http_error_without_hint(script, tmp_path, capsys):
@@ -119,7 +120,7 @@ def test_localize_reports_http_error_without_hint(script, tmp_path, capsys):
     output = capsys.readouterr().out
     assert result == url
     assert "HTTP 404" in output
-    assert "прокси" not in output
+    assert "proxy" not in output
 
 
 def test_localize_reports_write_error(script, tmp_path, capsys, monkeypatch):
@@ -134,7 +135,7 @@ def test_localize_reports_write_error(script, tmp_path, capsys, monkeypatch):
     result = make_downloader(script, tmp_path, session).localize(url)
 
     assert result == url
-    assert "Не удалось сохранить" in capsys.readouterr().out
+    assert "Failed to save" in capsys.readouterr().out
 
 
 def test_filename_for_url_is_deterministic(script):

@@ -59,7 +59,7 @@ def test_download_without_proxy(script, run_main, tmp_path, image_server, capsys
     name = script.filename_for_url(image_server, ".png")
     assert (tmp_path / "media" / name).read_bytes() == PNG_BYTES
     assert f"![img](media/{name})" in path.read_text(encoding="utf-8")
-    assert "Скачано: 1" in output
+    assert "Downloaded: 1" in output
 
 
 def test_download_through_socks_proxy(
@@ -75,7 +75,7 @@ def test_download_through_socks_proxy(
     assert (tmp_path / "media" / name).read_bytes() == PNG_BYTES
     assert f"![img](media/{name})" in path.read_text(encoding="utf-8")
     assert f"[PROXY] {socks_proxy.url}" in output
-    assert "Скачано: 1" in output
+    assert "Downloaded: 1" in output
 
 
 def test_unreachable_proxy_keeps_link(
@@ -88,7 +88,7 @@ def test_unreachable_proxy_keeps_link(
 
     output = capsys.readouterr().out
     assert path.read_text(encoding="utf-8") == f"# Заметка\n\n![img]({image_server})\n"
-    assert "Скачано: 0" in output
-    assert "Ошибок: 1" in output
+    assert "Downloaded: 0" in output
+    assert "Errors: 1" in output
     assert proxy in output
-    assert "недоступен?" in output
+    assert "unreachable?" in output
