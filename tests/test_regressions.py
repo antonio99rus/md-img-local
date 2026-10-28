@@ -54,7 +54,6 @@ def test_escaped_image_syntax_is_not_rewritten(run_main, tmp_path, fake_session)
     assert path.read_text(encoding="utf-8") == source
 
 
-@pytest.mark.xfail(strict=True, reason="relative path with spaces is not escaped")
 def test_markdown_path_with_spaces_is_escaped(run_main, tmp_path, fake_session):
     media = tmp_path / "my images"
     path = write_md(tmp_path, f"![a]({URL})\n")
@@ -63,9 +62,9 @@ def test_markdown_path_with_spaces_is_escaped(run_main, tmp_path, fake_session):
 
     text = path.read_text(encoding="utf-8")
     assert "](my images/" not in text
+    assert "](my%20images/" in text
 
 
-@pytest.mark.xfail(strict=True, reason="HTML src with spaces is not escaped")
 def test_html_src_with_spaces_is_escaped(run_main, tmp_path, fake_session):
     media = tmp_path / "my images"
     path = write_md(tmp_path, f'<img src="{URL}" alt="x">\n')
@@ -74,6 +73,26 @@ def test_html_src_with_spaces_is_escaped(run_main, tmp_path, fake_session):
 
     text = path.read_text(encoding="utf-8")
     assert 'src="my images/' not in text
+    assert 'src="my%20images/' in text
+
+
+def test_reference_path_with_spaces_is_escaped(run_main, tmp_path, fake_session):
+    media = tmp_path / "my images"
+    path = write_md(tmp_path, f"![a][pic]\n\n[pic]: {URL}\n")
+
+    run_main(path, f"--media={media}")
+
+    text = path.read_text(encoding="utf-8")
+    assert "![a](my%20images/" in text
+    assert "[pic]:" not in text
+
+
+def test_relative_path_for_markdown_escapes_special_characters(script, tmp_path):
+    destination = tmp_path / "my images (1)" / "a#b.png"
+
+    result = script.relative_path_for_markdown(destination, tmp_path)
+
+    assert result == "my%20images%20%281%29/a%23b.png"
 
 
 @pytest.mark.xfail(strict=True, reason="cp1251 input raises UnicodeDecodeError")

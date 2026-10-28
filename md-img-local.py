@@ -10,7 +10,7 @@ import re
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from urllib.parse import urlparse, urlsplit, unquote
+from urllib.parse import quote, urlparse, urlsplit, unquote
 
 import requests
 
@@ -359,6 +359,12 @@ def filename_for_url(url: str, extension: str) -> str:
     return f"{original_name}-{url_hash}{extension}"
 
 
+def relative_path_for_markdown(destination: Path, base_dir: Path) -> str:
+    """Возвращает posix-путь относительно base_dir, безопасный для Markdown/HTML."""
+    relative = Path(os.path.relpath(destination, base_dir)).as_posix()
+    return quote(relative, safe="/")
+
+
 def is_remote(url: str) -> bool:
     return url is not None and url.lower().startswith(("http://", "https://"))
 
@@ -399,7 +405,7 @@ class Downloader:
             filename = filename_for_url(url, extension)
             destination = self.media_dir / filename
             destination.write_bytes(response.content)
-            relative = Path(os.path.relpath(destination, self.base_dir)).as_posix()
+            relative = relative_path_for_markdown(destination, self.base_dir)
             result = relative
             self.downloaded += 1
             print(tr("downloaded_file", url=url, path=relative))
