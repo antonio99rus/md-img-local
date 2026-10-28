@@ -8,7 +8,7 @@ import mimetypes
 import os
 import re
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from urllib.parse import quote, urlparse, urlsplit, unquote
 
@@ -31,6 +31,11 @@ REF_DEF_RE = re.compile(
     r'(?:\s+(?:"[^"]*"|\'[^\']*\'|\([^)]*\)))?[ \t]*\r?\n?',
     re.MULTILINE,
 )
+
+FENCE_RE = re.compile(r"^( {0,3})(`{3,}|~{3,})(.*)$")
+HTML_COMMENT_RE = re.compile(r"<!--.*?(?:-->|\Z)", re.DOTALL)
+INLINE_CODE_RE = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)", re.DOTALL)
+ESCAPED_BANG_RE = re.compile(r"(?<!\\)(?:\\\\)*\\!")
 
 VERSION = "1.2.0"
 
@@ -365,6 +370,64 @@ def relative_path_for_markdown(destination: Path, base_dir: Path) -> str:
     return quote(relative, safe="/")
 
 
+def _protect_fenced_code(text: str, stash: Callable[[str], str]) -> str:
+    lines = text.splitlines(keepends=True)
+    result: list[str] = []
+    index = 0
+    while index < len(lines):
+        opening = FENCE_RE.match(lines[index])
+        if opening is None:
+            result.append(lines[index])
+            index += 1
+            continue
+
+        fence = opening.group(2)
+        fence_char = fence[0]
+        fence_length = len(fence)
+        block = [lines[index]]
+        index += 1
+        while index < len(lines):
+            block.append(lines[index])
+            closing = FENCE_RE.match(lines[index])
+            index += 1
+            if (
+                closing is not None
+                and closing.group(2)[0] == fence_char
+                and len(closing.group(2)) >= fence_length
+                and not closing.group(3).strip()
+            ):
+                break
+        result.append(stash("".join(block)))
+    return "".join(result)
+
+
+def protect_markdown_regions(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """Прячет код и комментарии, чтобы regex не менял их содержимое."""
+    regions: list[tuple[str, str]] = []
+
+    def stash(value: str) -> str:
+        token = f"\x00md-img-local:{len(regions)}\x00"
+        # Переносы строк сохраняем, иначе следующая строка склеится с токеном.
+        token += "\n" * value.count("\n")
+        regions.append((token, value))
+        return token
+
+    text = _protect_fenced_code(text, stash)
+    text = HTML_COMMENT_RE.sub(lambda match: stash(match.group(0)), text)
+    text = INLINE_CODE_RE.sub(lambda match: stash(match.group(0)), text)
+    text = ESCAPED_BANG_RE.sub(lambda match: stash(match.group(0)), text)
+    return text, regions
+
+
+def restore_markdown_regions(
+    text: str, regions: Sequence[tuple[str, str]]
+) -> str:
+    """Возвращает защищённые участки; порядок обратный из-за вложенности."""
+    for token, value in reversed(regions):
+        text = text.replace(token, value)
+    return text
+
+
 def is_remote(url: str) -> bool:
     return url is not None and url.lower().startswith(("http://", "https://"))
 
@@ -489,6 +552,7 @@ def main() -> None:
     session = build_session(proxy)
     downloader = Downloader(media_dir, source_path.parent, session, proxy_label)
     text = source_path.read_text(encoding="utf-8")
+    protected_text, protected_regions = protect_markdown_regions(text)
 
     found_urls: set[str] = set()
 
@@ -516,7 +580,7 @@ def main() -> None:
         return f"{prefix}{quote}{local}{quote}{suffix}"
 
     ref_urls: dict[str, str] = {}
-    for match in REF_DEF_RE.finditer(text):
+    for match in REF_DEF_RE.finditer(protected_text):
         url = match.group(2) or match.group(3)
         if url:
             ref_urls[match.group(1).lower()] = url
@@ -536,7 +600,7 @@ def main() -> None:
         replaced_ref_keys.add(key)
         return f"![{alt}]({local})"
 
-    new_text = INLINE_IMAGE_RE.sub(replace_inline, text)
+    new_text = INLINE_IMAGE_RE.sub(replace_inline, protected_text)
     new_text = HTML_IMG_RE.sub(replace_html, new_text)
     new_text = REF_IMAGE_RE.sub(replace_ref_image, new_text)
 
@@ -554,6 +618,7 @@ def main() -> None:
         return ""
 
     new_text = REF_DEF_RE.sub(drop_used_definitions, new_text)
+    new_text = restore_markdown_regions(new_text, protected_regions)
 
     backup_path = source_path.with_name(f"{source_path.name}.orig")
     if not args.no_backup:

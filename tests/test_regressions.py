@@ -14,7 +14,6 @@ def write_md(tmp_path: Path, text: str) -> Path:
     return path
 
 
-@pytest.mark.xfail(strict=True, reason="regex rewrites fenced code blocks")
 def test_fenced_code_is_not_rewritten(run_main, tmp_path, fake_session):
     source = f"```\n![a]({URL})\n```\n"
     path = write_md(tmp_path, source)
@@ -24,7 +23,35 @@ def test_fenced_code_is_not_rewritten(run_main, tmp_path, fake_session):
     assert path.read_text(encoding="utf-8") == source
 
 
-@pytest.mark.xfail(strict=True, reason="regex rewrites inline code")
+def test_fenced_code_with_info_string_is_not_rewritten(
+    run_main, tmp_path, fake_session
+):
+    source = f"```markdown\n![a]({URL})\n```\n"
+    path = write_md(tmp_path, source)
+
+    run_main(path)
+
+    assert path.read_text(encoding="utf-8") == source
+
+
+def test_tilde_fence_is_not_rewritten(run_main, tmp_path, fake_session):
+    source = f"~~~\n![a]({URL})\n~~~\n"
+    path = write_md(tmp_path, source)
+
+    run_main(path)
+
+    assert path.read_text(encoding="utf-8") == source
+
+
+def test_unclosed_fence_is_not_rewritten(run_main, tmp_path, fake_session):
+    source = f"```\n![a]({URL})\n"
+    path = write_md(tmp_path, source)
+
+    run_main(path)
+
+    assert path.read_text(encoding="utf-8") == source
+
+
 def test_inline_code_is_not_rewritten(run_main, tmp_path, fake_session):
     source = f"`![a]({URL})`\n"
     path = write_md(tmp_path, source)
@@ -34,7 +61,17 @@ def test_inline_code_is_not_rewritten(run_main, tmp_path, fake_session):
     assert path.read_text(encoding="utf-8") == source
 
 
-@pytest.mark.xfail(strict=True, reason="regex rewrites HTML comments")
+def test_double_backtick_inline_code_is_not_rewritten(
+    run_main, tmp_path, fake_session
+):
+    source = f"``![a]({URL})``\n"
+    path = write_md(tmp_path, source)
+
+    run_main(path)
+
+    assert path.read_text(encoding="utf-8") == source
+
+
 def test_html_comment_is_not_rewritten(run_main, tmp_path, fake_session):
     source = f'<!-- <img src="{URL}" alt="x"> -->\n'
     path = write_md(tmp_path, source)
@@ -44,9 +81,84 @@ def test_html_comment_is_not_rewritten(run_main, tmp_path, fake_session):
     assert path.read_text(encoding="utf-8") == source
 
 
-@pytest.mark.xfail(strict=True, reason="escaped image syntax is still an image for regex")
+def test_nested_inline_code_and_html_comment_is_untouched(
+    run_main, tmp_path, fake_session
+):
+    source = f'`<!-- <img src="{URL}" alt="x"> -->`\n'
+    path = write_md(tmp_path, source)
+
+    run_main(path)
+
+    assert path.read_text(encoding="utf-8") == source
+
+
 def test_escaped_image_syntax_is_not_rewritten(run_main, tmp_path, fake_session):
     source = f"\\![a]({URL})\n"
+    path = write_md(tmp_path, source)
+
+    run_main(path)
+
+    assert path.read_text(encoding="utf-8") == source
+
+
+def test_reference_definition_inside_fence_is_untouched(
+    run_main, tmp_path, fake_session
+):
+    source = f"```\n[pic]: {URL}\n```\n\n![a][pic]\n"
+    path = write_md(tmp_path, source)
+
+    run_main(path)
+
+    assert path.read_text(encoding="utf-8") == source
+    assert fake_session.calls == []
+
+
+def test_reference_definition_after_fence_is_still_resolved(
+    run_main, tmp_path, fake_session
+):
+    source = f"```\ncode\n```\n[pic]: {URL}\n\n![a][pic]\n"
+    path = write_md(tmp_path, source)
+
+    run_main(path)
+
+    text = path.read_text(encoding="utf-8")
+    assert "```\ncode\n```\n" in text
+    assert "![a](media/" in text
+    assert "[pic]:" not in text
+    assert len(fake_session.calls) == 1
+
+
+def test_text_outside_fence_is_still_rewritten(
+    run_main, tmp_path, fake_session
+):
+    source = f"```\n![a]({URL})\n```\n\n![b]({URL})\n"
+    path = write_md(tmp_path, source)
+
+    run_main(path)
+
+    text = path.read_text(encoding="utf-8")
+    assert f"```\n![a]({URL})\n```\n" in text
+    assert "![b](media/" in text
+    assert len(fake_session.calls) == 1
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="indented code blocks require a real Markdown parser",
+)
+def test_indented_code_is_not_rewritten(run_main, tmp_path, fake_session):
+    source = f"    ![a]({URL})\n"
+    path = write_md(tmp_path, source)
+
+    run_main(path)
+
+    assert path.read_text(encoding="utf-8") == source
+
+
+def test_fence_inside_blockquote_is_not_rewritten(
+    run_main, tmp_path, fake_session
+):
+    source = f"> ```\n> ![a]({URL})\n> ```\n"
     path = write_md(tmp_path, source)
 
     run_main(path)
