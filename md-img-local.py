@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import certifi
 import hashlib
 import locale
@@ -37,6 +38,14 @@ HTML_COMMENT_RE = re.compile(r"<!--.*?(?:-->|\Z)", re.DOTALL)
 INLINE_CODE_RE = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)", re.DOTALL)
 ESCAPED_BANG_RE = re.compile(r"(?<!\\)(?:\\\\)*\\!")
 
+BOM_ENCODINGS = (
+    (codecs.BOM_UTF32_LE, "utf-32-le"),
+    (codecs.BOM_UTF32_BE, "utf-32-be"),
+    (codecs.BOM_UTF8, "utf-8"),
+    (codecs.BOM_UTF16_LE, "utf-16-le"),
+    (codecs.BOM_UTF16_BE, "utf-16-be"),
+)
+
 VERSION = "1.2.0"
 
 # UA = "markdown-image-downloader/1.0"
@@ -71,6 +80,9 @@ MESSAGES: dict[str, dict[str, str]] = {
         "options_title": "options",
         "error_prefix": "error",
         "file_not_found": "file not found: {path}",
+        "encoding_error": (
+            "cannot decode {path} as UTF-8/UTF-16/UTF-32: {error}"
+        ),
         "proxy_spaces": "proxy URL must not contain spaces",
         "proxy_unsupported": (
             "unsupported proxy URL {value!r}: expected scheme {schemes}, "
@@ -122,6 +134,9 @@ MESSAGES: dict[str, dict[str, str]] = {
         "options_title": "параметры",
         "error_prefix": "ошибка",
         "file_not_found": "файл не найден: {path}",
+        "encoding_error": (
+            "не удалось декодировать {path} как UTF-8/UTF-16/UTF-32: {error}"
+        ),
         "proxy_spaces": "адрес прокси не должен содержать пробелов",
         "proxy_unsupported": (
             "неподдерживаемый адрес прокси {value!r}: ожидается схема {schemes}, "
@@ -370,6 +385,19 @@ def relative_path_for_markdown(destination: Path, base_dir: Path) -> str:
     return quote(relative, safe="/")
 
 
+def decode_markdown(data: bytes) -> tuple[str, str, bytes]:
+    """Декодирует файл, сохраняя исходный BOM и переводы строк."""
+    for bom, encoding in BOM_ENCODINGS:
+        if data.startswith(bom):
+            return data[len(bom):].decode(encoding), encoding, bom
+    return data.decode("utf-8"), "utf-8", b""
+
+
+def encode_markdown(text: str, encoding: str, bom: bytes) -> bytes:
+    """Кодирует текст обратно в исходной кодировке с тем же BOM."""
+    return bom + text.encode(encoding)
+
+
 def _protect_fenced_code(text: str, stash: Callable[[str], str]) -> str:
     lines = text.splitlines(keepends=True)
     result: list[str] = []
@@ -551,7 +579,10 @@ def main() -> None:
 
     session = build_session(proxy)
     downloader = Downloader(media_dir, source_path.parent, session, proxy_label)
-    text = source_path.read_text(encoding="utf-8")
+    try:
+        text, encoding, bom = decode_markdown(source_path.read_bytes())
+    except UnicodeDecodeError as error:
+        parser.error(tr("encoding_error", path=source_path, error=error))
     protected_text, protected_regions = protect_markdown_regions(text)
 
     found_urls: set[str] = set()
@@ -624,7 +655,7 @@ def main() -> None:
     if not args.no_backup:
         source_path.replace(backup_path)
         print(tr("backup", source=source_path.name, backup=backup_path.name))
-    source_path.write_text(new_text, encoding="utf-8")
+    source_path.write_bytes(encode_markdown(new_text, encoding, bom))
 
     print(tr("result", path=source_path))
     print(tr("found", count=len(found_urls)))

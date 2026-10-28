@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 from pathlib import Path
 
 import pytest
@@ -207,7 +208,123 @@ def test_relative_path_for_markdown_escapes_special_characters(script, tmp_path)
     assert result == "my%20images%20%281%29/a%23b.png"
 
 
-@pytest.mark.xfail(strict=True, reason="cp1251 input raises UnicodeDecodeError")
+def test_lf_line_endings_are_preserved(run_main, tmp_path, fake_session):
+    source = f"![a]({URL})\n\nтекст\n"
+    path = tmp_path / "note.md"
+    path.write_bytes(source.encode("utf-8"))
+
+    run_main(path)
+
+    data = path.read_bytes()
+    assert b"\r" not in data
+    assert data.endswith(b"\n")
+    assert b"media/" in data
+
+
+def test_crlf_line_endings_are_preserved(run_main, tmp_path, fake_session):
+    source = f"![a]({URL})\r\n\r\nтекст\r\n"
+    path = tmp_path / "note.md"
+    path.write_bytes(source.encode("utf-8"))
+
+    run_main(path)
+
+    data = path.read_bytes()
+    assert b"\r\n\r\n" in data
+    assert b"\n" not in data.replace(b"\r\n", b"")
+    assert b"media/" in data
+
+
+def test_missing_final_newline_is_preserved(run_main, tmp_path, fake_session):
+    path = tmp_path / "note.md"
+    path.write_bytes(f"![a]({URL})".encode("utf-8"))
+
+    run_main(path)
+
+    data = path.read_bytes()
+    assert b"media/" in data
+    assert not data.endswith(b"\n")
+
+
+def test_utf8_bom_is_preserved(run_main, tmp_path, fake_session):
+    source = f"![a]({URL})\n"
+    path = tmp_path / "note.md"
+    path.write_bytes(codecs.BOM_UTF8 + source.encode("utf-8"))
+
+    run_main(path)
+
+    data = path.read_bytes()
+    assert data.startswith(codecs.BOM_UTF8)
+    assert b"media/" in data[len(codecs.BOM_UTF8):]
+
+
+@pytest.mark.parametrize("encoding", ["utf-16-le", "utf-16-be"])
+def test_utf16_file_is_rewritten_in_same_encoding(
+    run_main, tmp_path, fake_session, encoding
+):
+    bom = (
+        codecs.BOM_UTF16_LE
+        if encoding == "utf-16-le"
+        else codecs.BOM_UTF16_BE
+    )
+    source = f"![a]({URL})\n\nпривет\n"
+    path = tmp_path / "note.md"
+    path.write_bytes(bom + source.encode(encoding))
+
+    run_main(path)
+
+    data = path.read_bytes()
+    assert data.startswith(bom)
+    text = data[len(bom):].decode(encoding)
+    assert "media/" in text
+    assert "привет" in text
+    assert "\n\n" in text
+
+
+@pytest.mark.parametrize("encoding", ["utf-32-le", "utf-32-be"])
+def test_utf32_file_is_rewritten_in_same_encoding(
+    run_main, tmp_path, fake_session, encoding
+):
+    bom = (
+        codecs.BOM_UTF32_LE
+        if encoding == "utf-32-le"
+        else codecs.BOM_UTF32_BE
+    )
+    source = f"![a]({URL})\n\nпривет\n"
+    path = tmp_path / "note.md"
+    path.write_bytes(bom + source.encode(encoding))
+
+    run_main(path)
+
+    data = path.read_bytes()
+    assert data.startswith(bom)
+    text = data[len(bom):].decode(encoding)
+    assert "media/" in text
+    assert "привет" in text
+
+
+@pytest.mark.parametrize(
+    ("encoding", "bom"),
+    [
+        ("utf-8", b""),
+        ("utf-8", codecs.BOM_UTF8),
+        ("utf-16-le", codecs.BOM_UTF16_LE),
+        ("utf-16-be", codecs.BOM_UTF16_BE),
+        ("utf-32-le", codecs.BOM_UTF32_LE),
+        ("utf-32-be", codecs.BOM_UTF32_BE),
+    ],
+)
+def test_decode_encode_markdown_round_trip(script, encoding, bom):
+    text = "строка с картинкой\nвторая строка"
+    data = bom + text.encode(encoding)
+
+    decoded, actual_encoding, actual_bom = script.decode_markdown(data)
+
+    assert decoded == text
+    assert actual_encoding == encoding
+    assert actual_bom == bom
+    assert script.encode_markdown(decoded, actual_encoding, actual_bom) == data
+
+
 def test_cp1251_file_reports_clean_error(run_main, tmp_path, capsys):
     path = tmp_path / "note.md"
     path.write_bytes("привет".encode("cp1251"))
@@ -217,6 +334,7 @@ def test_cp1251_file_reports_clean_error(run_main, tmp_path, capsys):
 
     assert error.value.code == 2
     assert "Traceback" not in capsys.readouterr().err
+    assert not (tmp_path / "note.md.orig").exists()
 
 
 @pytest.mark.xfail(strict=True, reason="failures do not affect the exit code")

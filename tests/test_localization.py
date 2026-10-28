@@ -144,6 +144,7 @@ def test_all_languages_cover_required_messages(script):
         "options_title",
         "error_prefix",
         "file_not_found",
+        "encoding_error",
         "proxy_spaces",
         "proxy_unsupported",
         "proxy_invalid",
