@@ -14,3 +14,24 @@ dependencies = [
 [tool.uv]
 # Проект — одиночный скрипт, устанавливать его как пакет не нужно.
 package = false
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]
+addopts = "-q"
+
+[tool.coverage.run]
+include = ["md-img-local.py"]
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+]

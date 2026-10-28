@@ -81,6 +81,18 @@ python md-img-local.py note.md --proxy=http://user:password@proxy.example:3128
 
 При ошибке скачивания ссылка остаётся как была, обработка продолжается.
 
+## Тесты
+
+```bash
+uv sync                # заодно поставит dev-зависимости (pytest, pytest-cov)
+uv run pytest          # запуск тестов
+uv run pytest --cov    # запуск с отчётом о покрытии
+```
+
+Без `uv`: `pip install pytest pytest-cov`, затем `pytest`.
+
+Тесты лежат в `tests/`: проверки разбора прокси, скачивания, замены ссылок (inline, reference-style, HTML), резервных копий, CLI и интеграционные сценарии с локальным HTTP-сервером и SOCKS5-прокси.
+
 ## Лицензия
 
 MIT, см. [LICENSE](LICENSE).
