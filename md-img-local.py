@@ -8,6 +8,7 @@ import locale
 import mimetypes
 import os
 import re
+import shutil
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -67,6 +68,9 @@ MESSAGES: dict[str, dict[str, str]] = {
             "Directory for images; defaults to media/ next to the Markdown file"
         ),
         "help_no_backup": "Do not create a file.md.orig backup",
+        "help_force": (
+            "Overwrite an existing file.md.orig instead of rotating it"
+        ),
         "help_proxy": (
             "Proxy to download through: http, https, socks4, socks4a, socks5, "
             "socks5h (port required), e.g. socks5://127.0.0.1:3066. "
@@ -100,6 +104,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         ),
         "proxy_banner": "[PROXY] {proxy}",
         "backup": "[BACKUP] {source} -> {backup}",
+        "backup_rotated": "[BACKUP] rotated {backup} -> {path}",
         "downloaded_file": "[OK] {url} -> {path}",
         "download_failed": "[ERROR] Failed to download {url}: {error}{hint}",
         "save_failed": "[ERROR] Failed to save {url}: {error}",
@@ -119,6 +124,9 @@ MESSAGES: dict[str, dict[str, str]] = {
             "Каталог для изображений; по умолчанию media рядом с Markdown-файлом"
         ),
         "help_no_backup": "Не создавать резервную копию файла.md.orig",
+        "help_force": (
+            "Перезаписывать существующий файл.md.orig вместо ротации"
+        ),
         "help_proxy": (
             "Прокси для скачивания: http, https, socks4, socks4a, socks5, socks5h "
             "(порт обязателен), например socks5://127.0.0.1:3066. "
@@ -156,6 +164,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         ),
         "proxy_banner": "[PROXY] {proxy}",
         "backup": "[BACKUP] {source} -> {backup}",
+        "backup_rotated": "[BACKUP] прежняя копия {backup} -> {path}",
         "downloaded_file": "[OK] {url} -> {path}",
         "download_failed": "[ERROR] Не удалось скачать {url}: {error}{hint}",
         "save_failed": "[ERROR] Не удалось сохранить {url}: {error}",
@@ -398,6 +407,33 @@ def encode_markdown(text: str, encoding: str, bom: bytes) -> bytes:
     return bom + text.encode(encoding)
 
 
+def make_backup(
+    source_path: Path, force: bool = False
+) -> tuple[Path, Path | None]:
+    """Делает независимую копию файла в .orig, ротируя прежнюю.
+
+    Возвращает путь копии и путь, куда была перемещена предыдущая копия.
+    """
+    backup_path = source_path.with_name(f"{source_path.name}.orig")
+    rotated_path: Path | None = None
+    if backup_path.exists():
+        if force:
+            backup_path.unlink()
+        else:
+            index = 1
+            while True:
+                candidate = source_path.with_name(
+                    f"{source_path.name}.orig.{index}"
+                )
+                if not candidate.exists():
+                    break
+                index += 1
+            os.replace(backup_path, candidate)
+            rotated_path = candidate
+    shutil.copy2(source_path, backup_path)
+    return backup_path, rotated_path
+
+
 def _protect_fenced_code(text: str, stash: Callable[[str], str]) -> str:
     lines = text.splitlines(keepends=True)
     result: list[str] = []
@@ -532,6 +568,11 @@ def main() -> None:
         help=tr("help_no_backup"),
     )
     parser.add_argument(
+        "--force",
+        action="store_true",
+        help=tr("help_force"),
+    )
+    parser.add_argument(
         "--proxy",
         default=None,
         metavar="URL",
@@ -651,9 +692,16 @@ def main() -> None:
     new_text = REF_DEF_RE.sub(drop_used_definitions, new_text)
     new_text = restore_markdown_regions(new_text, protected_regions)
 
-    backup_path = source_path.with_name(f"{source_path.name}.orig")
     if not args.no_backup:
-        source_path.replace(backup_path)
+        backup_path, rotated_path = make_backup(source_path, args.force)
+        if rotated_path is not None:
+            print(
+                tr(
+                    "backup_rotated",
+                    backup=backup_path.name,
+                    path=rotated_path.name,
+                )
+            )
         print(tr("backup", source=source_path.name, backup=backup_path.name))
     source_path.write_bytes(encode_markdown(new_text, encoding, bom))
 

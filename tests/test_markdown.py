@@ -169,6 +169,83 @@ def test_no_backup_flag(script, run_main, tmp_path, fake_session):
     assert local_name(script) in path.read_text(encoding="utf-8")
 
 
+def test_make_backup_copies_without_moving_source(script, tmp_path):
+    source = tmp_path / "note.md"
+    source.write_text("v1", encoding="utf-8")
+
+    backup, rotated = script.make_backup(source, force=False)
+
+    assert rotated is None
+    assert source.read_text(encoding="utf-8") == "v1"
+    assert backup.read_text(encoding="utf-8") == "v1"
+    assert backup.stat().st_ino != source.stat().st_ino
+
+
+def test_make_backup_rotates_existing_copy(script, tmp_path):
+    source = tmp_path / "note.md"
+    source.write_text("v3", encoding="utf-8")
+    (tmp_path / "note.md.orig").write_text("v2", encoding="utf-8")
+    (tmp_path / "note.md.orig.1").write_text("v1", encoding="utf-8")
+
+    backup, rotated = script.make_backup(source, force=False)
+
+    assert rotated is not None
+    assert rotated.name == "note.md.orig.2"
+    assert rotated.read_text(encoding="utf-8") == "v2"
+    assert backup.read_text(encoding="utf-8") == "v3"
+    assert (tmp_path / "note.md.orig.1").read_text(encoding="utf-8") == "v1"
+
+
+def test_make_backup_force_overwrites_without_rotation(script, tmp_path):
+    source = tmp_path / "note.md"
+    source.write_text("v2", encoding="utf-8")
+    (tmp_path / "note.md.orig").write_text("v1", encoding="utf-8")
+
+    backup, rotated = script.make_backup(source, force=True)
+
+    assert rotated is None
+    assert backup.read_text(encoding="utf-8") == "v2"
+    assert not (tmp_path / "note.md.orig.1").exists()
+
+
+def test_existing_backup_is_rotated_between_runs(
+    script, run_main, tmp_path, fake_session
+):
+    original = f"![a]({URL})\n"
+    path = write_md(tmp_path, original)
+    backup = path.with_name(f"{path.name}.orig")
+
+    run_main(path)
+    assert backup.read_text(encoding="utf-8") == original
+
+    second = f"![b]({URL})\n"
+    path.write_text(second, encoding="utf-8")
+
+    run_main(path)
+
+    rotated = path.with_name(f"{path.name}.orig.1")
+    assert rotated.read_text(encoding="utf-8") == original
+    assert backup.read_text(encoding="utf-8") == second
+    assert local_name(script) in path.read_text(encoding="utf-8")
+
+
+def test_force_overwrites_backup_between_runs(
+    script, run_main, tmp_path, fake_session
+):
+    path = write_md(tmp_path, f"![a]({URL})\n")
+    backup = path.with_name(f"{path.name}.orig")
+
+    run_main(path)
+
+    second = f"![b]({URL})\n"
+    path.write_text(second, encoding="utf-8")
+
+    run_main(path, "--force")
+
+    assert backup.read_text(encoding="utf-8") == second
+    assert not path.with_name(f"{path.name}.orig.1").exists()
+
+
 def test_custom_media_dir(script, run_main, tmp_path, fake_session):
     notes = tmp_path / "notes"
     notes.mkdir()
