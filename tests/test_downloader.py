@@ -37,6 +37,7 @@ def test_localize_passes_expected_request_options(script, tmp_path):
     _, kwargs = session.calls[0]
     assert kwargs["verify"] == certifi.where()
     assert kwargs["timeout"] == 30
+    assert kwargs["stream"] is True
 
 
 def test_localize_dedupes_same_url(script, tmp_path):
@@ -70,13 +71,15 @@ def test_localize_uses_content_type_extension(script, tmp_path):
     assert result.endswith(".png")
 
 
-def test_localize_falls_back_to_bin(script, tmp_path):
+def test_localize_rejects_missing_content_type(script, tmp_path, capsys):
     url = "http://example.com/download"
     session = FakeSession({url: FakeResponse(headers={})})
 
     result = make_downloader(script, tmp_path, session).localize(url)
 
-    assert result.endswith(".bin")
+    assert result == url
+    assert "Content-Type" in capsys.readouterr().out
+    assert list((tmp_path / "media").iterdir()) == []
 
 
 def test_localize_keeps_query_in_hash(script, tmp_path):
@@ -127,15 +130,23 @@ def test_localize_reports_write_error(script, tmp_path, capsys, monkeypatch):
     url = "http://example.com/pic.png"
     session = FakeSession({url: FakeResponse()})
 
-    def fail_write(self, data):
+    def fail_write(media_dir, destination, data):
         raise OSError("disk full")
 
-    monkeypatch.setattr(Path, "write_bytes", fail_write)
+    monkeypatch.setattr(script, "store_download", fail_write)
 
     result = make_downloader(script, tmp_path, session).localize(url)
 
     assert result == url
     assert "Failed to save" in capsys.readouterr().out
+
+
+def test_build_session_limits_redirects(script):
+    session = script.build_session(None)
+    try:
+        assert session.max_redirects == 5
+    finally:
+        session.close()
 
 
 def test_filename_for_url_is_deterministic(script):

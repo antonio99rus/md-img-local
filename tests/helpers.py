@@ -20,12 +20,22 @@ class FakeResponse:
         status_code: int = 200,
     ) -> None:
         self.content = content
-        self.headers = headers or {}
+        self.headers = (
+            headers if headers is not None else {"Content-Type": "image/png"}
+        )
         self.status_code = status_code
+        self.closed = False
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
             raise requests.HTTPError(f"HTTP {self.status_code}")
+
+    def iter_content(self, chunk_size: int = 1):
+        for start in range(0, len(self.content), chunk_size):
+            yield self.content[start:start + chunk_size]
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class FakeSession:

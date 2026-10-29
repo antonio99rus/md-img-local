@@ -51,6 +51,24 @@ BOM_ENCODINGS = (
 
 VERSION = "1.2.0"
 
+MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
+DOWNLOAD_CHUNK_SIZE = 64 * 1024
+MAX_REDIRECTS = 5
+
+# SVG намеренно отсутствует: это активный контент, опасный при публикации media.
+IMAGE_CONTENT_TYPES = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/bmp": ".bmp",
+    "image/tiff": ".tiff",
+    "image/avif": ".avif",
+    "image/x-icon": ".ico",
+    "image/vnd.microsoft.icon": ".ico",
+}
+
 # UA = "markdown-image-downloader/1.0"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
 
@@ -137,6 +155,11 @@ MESSAGES: dict[str, dict[str, str]] = {
         "download_failed": "[ERROR] Failed to download {url}: {error}{hint}",
         "save_failed": "[ERROR] Failed to save {url}: {error}",
         "proxy_hint": " (proxy {proxy} unreachable?)",
+        "download_too_large": "download too large (limit {limit} bytes)",
+        "download_wrong_type": (
+            "content type {content_type!r} is not an allowed image type"
+        ),
+        "content_type_missing": "missing or empty Content-Type",
         "result": "\nResult: {path}",
         "found": "Unique images found: {count}",
         "downloaded": "Downloaded: {count}",
@@ -225,6 +248,12 @@ MESSAGES: dict[str, dict[str, str]] = {
         "download_failed": "[ERROR] Не удалось скачать {url}: {error}{hint}",
         "save_failed": "[ERROR] Не удалось сохранить {url}: {error}",
         "proxy_hint": " (прокси {proxy} недоступен?)",
+        "download_too_large": "файл слишком большой (лимит {limit} байт)",
+        "download_wrong_type": (
+            "тип содержимого {content_type!r} не входит в список "
+            "разрешённых изображений"
+        ),
+        "content_type_missing": "отсутствует или пуст Content-Type",
         "result": "\nРезультат: {path}",
         "found": "Найдено уникальных изображений: {count}",
         "downloaded": "Скачано: {count}",
@@ -418,11 +447,58 @@ def ensure_socks_support(proxy: str) -> None:
 def build_session(proxy: str | None) -> requests.Session:
     session = requests.Session()
     session.headers["User-Agent"] = UA
+    session.max_redirects = MAX_REDIRECTS
     if proxy:
         # Явно указанный прокси должен главенствовать над HTTP_PROXY/HTTPS_PROXY/NO_PROXY.
         session.trust_env = False
         session.proxies.update({"http": proxy, "https": proxy})
     return session
+
+
+class DownloadRejected(Exception):
+    """Загрузка отклонена: размер, тип или отсутствие Content-Type."""
+
+
+def content_type_of(response: requests.Response) -> str:
+    return response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+
+
+def read_limited(response: requests.Response, limit: int) -> bytes:
+    """Читает тело потоком, не позволяя превысить limit байт."""
+    length = response.headers.get("Content-Length")
+    if length:
+        try:
+            declared = int(length)
+        except ValueError:
+            declared = None
+        if declared is not None and declared > limit:
+            raise DownloadRejected(tr("download_too_large", limit=limit))
+
+    buffer = bytearray()
+    for chunk in response.iter_content(DOWNLOAD_CHUNK_SIZE):
+        buffer.extend(chunk)
+        if len(buffer) > limit:
+            raise DownloadRejected(tr("download_too_large", limit=limit))
+    return bytes(buffer)
+
+
+def store_download(media_dir: Path, destination: Path, data: bytes) -> None:
+    """Пишет через уникальный temp и os.replace, не следуя симлинкам."""
+    descriptor, temp_name = tempfile.mkstemp(
+        prefix=".md-img-local-",
+        suffix=".part",
+        dir=media_dir,
+    )
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_path, destination)
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
 
 
 def extension_from_response(response: requests.Response, url: str) -> str:
@@ -798,17 +874,28 @@ class Downloader:
         proxy_hint = (
             tr("proxy_hint", proxy=self.proxy_label) if self.proxy_label else ""
         )
+        response = None
         try:
             response = self.session.get(
                 url,
+                stream=True,
                 verify=certifi.where(),
                 timeout=30,
             )
             response.raise_for_status()
+            content_type = content_type_of(response)
+            if content_type not in IMAGE_CONTENT_TYPES:
+                raise DownloadRejected(
+                    tr(
+                        "download_wrong_type",
+                        content_type=content_type or tr("content_type_missing"),
+                    )
+                )
+            data = read_limited(response, MAX_DOWNLOAD_BYTES)
             extension = extension_from_response(response, url)
             filename = filename_for_url(url, extension)
             destination = self.media_dir / filename
-            destination.write_bytes(response.content)
+            store_download(self.media_dir, destination, data)
             relative = relative_path_for_markdown(destination, self.base_dir)
             result = relative
             self.downloaded += 1
@@ -816,9 +903,15 @@ class Downloader:
         except requests.RequestException as error:
             self.failed += 1
             print(tr("download_failed", url=url, error=error, hint=proxy_hint))
+        except DownloadRejected as error:
+            self.failed += 1
+            print(tr("download_failed", url=url, error=error, hint=""))
         except OSError as error:
             self.failed += 1
             print(tr("save_failed", url=url, error=error))
+        finally:
+            if response is not None:
+                response.close()
         self.cache[url] = result
         return result
 
