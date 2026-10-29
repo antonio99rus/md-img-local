@@ -4,16 +4,18 @@ import argparse
 import codecs
 import certifi
 import hashlib
+import ipaddress
 import json
 import locale
 import os
 import re
 import shutil
+import socket
 import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from urllib.parse import quote, urlparse, urlsplit, urlunsplit, unquote
+from urllib.parse import quote, urljoin, urlparse, urlsplit, urlunsplit, unquote
 
 import requests
 
@@ -53,6 +55,7 @@ VERSION = "1.2.0"
 MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 DOWNLOAD_CHUNK_SIZE = 64 * 1024
 MAX_REDIRECTS = 5
+REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 # SVG намеренно отсутствует: это активный контент, опасный при публикации media.
 IMAGE_CONTENT_TYPES = {
@@ -82,6 +85,22 @@ WINDOWS_RESERVED_NAMES = frozenset(
     }
 )
 
+SENSITIVE_QUERY_MARKERS = (
+    "token",
+    "key",
+    "secret",
+    "signature",
+    "sig",
+    "password",
+    "passwd",
+    "auth",
+    "expires",
+    "session",
+    "credential",
+    "x-amz-",
+)
+LOG_URL_LIMIT = 200
+
 # UA = "markdown-image-downloader/1.0"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
 
@@ -99,6 +118,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         "help_markdown": "Source Markdown file",
         "help_media": (
             "Directory for images; defaults to media/ next to the Markdown file"
+        ),
+        "help_allow_private": (
+            "Allow downloads from private, loopback and link-local addresses "
+            "(disabled by default to prevent SSRF)"
         ),
         "help_no_backup": "Do not create a file.md.orig backup",
         "help_force": (
@@ -176,6 +199,17 @@ MESSAGES: dict[str, dict[str, str]] = {
             "content type {content_type!r} is not an allowed image type"
         ),
         "content_type_missing": "missing or empty Content-Type",
+        "url_scheme_blocked": (
+            "unsupported URL scheme {scheme!r}: only http and https are allowed"
+        ),
+        "url_no_host": "URL has no host",
+        "url_resolve_failed": "cannot resolve {host}: {error}",
+        "url_private_blocked": (
+            "refusing to download from {host} ({address}): private or "
+            "non-public address; pass --allow-private to override"
+        ),
+        "redirect_no_location": "redirect response has no Location header",
+        "redirect_too_many": "too many redirects (limit {limit})",
         "result": "\nResult: {path}",
         "found": "Unique images found: {count}",
         "downloaded": "Downloaded: {count}",
@@ -189,6 +223,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         "help_markdown": "Исходный Markdown-файл",
         "help_media": (
             "Каталог для изображений; по умолчанию media рядом с Markdown-файлом"
+        ),
+        "help_allow_private": (
+            "Разрешить скачивание с приватных, loopback- и link-local адресов "
+            "(по умолчанию запрещено для защиты от SSRF)"
         ),
         "help_no_backup": "Не создавать резервную копию файла.md.orig",
         "help_force": (
@@ -273,6 +311,17 @@ MESSAGES: dict[str, dict[str, str]] = {
             "разрешённых изображений"
         ),
         "content_type_missing": "отсутствует или пуст Content-Type",
+        "url_scheme_blocked": (
+            "неподдерживаемая схема URL {scheme!r}: разрешены только http и https"
+        ),
+        "url_no_host": "в URL не указан хост",
+        "url_resolve_failed": "не удалось разрешить {host}: {error}",
+        "url_private_blocked": (
+            "скачивание с {host} ({address}) запрещено: приватный или "
+            "непубличный адрес; используйте --allow-private, чтобы обойти запрет"
+        ),
+        "redirect_no_location": "в ответе-редиректе нет заголовка Location",
+        "redirect_too_many": "слишком много редиректов (лимит {limit})",
         "result": "\nРезультат: {path}",
         "found": "Найдено уникальных изображений: {count}",
         "downloaded": "Скачано: {count}",
@@ -418,7 +467,7 @@ def parse_proxy(raw: str | None) -> str | None:
         raise ProxyConfigError(
             tr(
                 "proxy_unsupported",
-                value=value,
+                value=mask_url(value),
                 schemes=", ".join(PROXY_SCHEMES),
             )
         )
@@ -476,6 +525,10 @@ def build_session(proxy: str | None) -> requests.Session:
 
 class DownloadRejected(Exception):
     """Загрузка отклонена: размер, тип или отсутствие Content-Type."""
+
+
+class UrlBlocked(DownloadRejected):
+    """URL отклонён политикой безопасности (SSRF, схема, редиректы)."""
 
 
 def content_type_of(response: requests.Response) -> str:
@@ -548,6 +601,115 @@ def canonical_url(url: str) -> str:
     if port is not None:
         netloc = f"{netloc}:{port}"
     return urlunsplit((scheme, netloc, parsed.path, parsed.query, ""))
+
+
+def sanitize_text(value: str) -> str:
+    """Заменяет управляющие символы, чтобы они не ломали вывод в терминале."""
+    return re.sub(r"[\x00-\x1f\x7f-\x9f]", "?", value)
+
+
+def mask_url(url: str) -> str:
+    """Скрывает учётные данные и чувствительные query-параметры для логов."""
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        return sanitize_text(url)[:LOG_URL_LIMIT]
+    host = parsed.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    if port is not None:
+        host = f"{host}:{port}"
+    if parsed.username is not None or parsed.password is not None:
+        host = f"***@{host}"
+    query = parsed.query
+    if query:
+        parts = []
+        for part in query.split("&"):
+            name = part.partition("=")[0]
+            lowered = name.lower()
+            if any(marker in lowered for marker in SENSITIVE_QUERY_MARKERS):
+                parts.append(f"{name}=***")
+            else:
+                parts.append(part)
+        query = "&".join(parts)
+    masked = sanitize_text(
+        urlunsplit((parsed.scheme, host, parsed.path, query, ""))
+    )
+    if len(masked) > LOG_URL_LIMIT:
+        masked = masked[: LOG_URL_LIMIT - 1] + "…"
+    return masked
+
+
+def safe_error(error: BaseException, url: str) -> str:
+    """Убирает из текста ошибки исходный URL с возможными секретами."""
+    text = sanitize_text(str(error))
+    masked = mask_url(url)
+    for candidate in (canonical_url(url), url):
+        if candidate:
+            text = text.replace(candidate, masked)
+    return text
+
+
+def resolve_host_ips(host: str) -> list[str]:
+    """Резолвит хост через системный DNS и возвращает уникальные адреса."""
+    addresses: list[str] = []
+    for info in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM):
+        address = info[4][0]
+        if address not in addresses:
+            addresses.append(address)
+    return addresses
+
+
+def is_blocked_address(address: str) -> bool:
+    """True для всех адресов, кроме публичных глобально маршрутизируемых."""
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        return True
+    mapped = getattr(parsed, "ipv4_mapped", None)
+    if mapped is not None:
+        parsed = mapped
+    return (
+        not parsed.is_global
+        or parsed.is_private
+        or parsed.is_loopback
+        or parsed.is_link_local
+        or parsed.is_multicast
+        or parsed.is_reserved
+        or parsed.is_unspecified
+    )
+
+
+def ensure_url_allowed(url: str, allow_private: bool = False) -> None:
+    """Не даёт скачивать с приватных адресов, если это не разрешено явно."""
+    try:
+        parsed = urlsplit(url)
+    except ValueError as error:
+        raise UrlBlocked(str(error)) from error
+    scheme = parsed.scheme.lower()
+    if scheme not in ("http", "https"):
+        raise UrlBlocked(tr("url_scheme_blocked", scheme=scheme))
+    host = parsed.hostname
+    if not host:
+        raise UrlBlocked(tr("url_no_host"))
+    if allow_private:
+        return
+    try:
+        addresses = resolve_host_ips(host)
+    except OSError as error:
+        raise UrlBlocked(
+            tr("url_resolve_failed", host=host, error=error)
+        ) from error
+    if not addresses:
+        raise UrlBlocked(
+            tr("url_resolve_failed", host=host, error=tr("url_no_host"))
+        )
+    for address in addresses:
+        if is_blocked_address(address):
+            raise UrlBlocked(
+                tr("url_private_blocked", host=host, address=address)
+            )
 
 
 def filename_for_url(url: str, extension: str) -> str:
@@ -901,14 +1063,37 @@ class Downloader:
         base_dir: Path,
         session: requests.Session,
         proxy_label: str | None = None,
+        allow_private: bool = False,
     ) -> None:
         self.media_dir = media_dir
         self.base_dir = base_dir
         self.session = session
         self.proxy_label = proxy_label
+        self.allow_private = allow_private
         self.cache: dict[str, str] = {}
         self.downloaded = 0
         self.failed = 0
+
+    def fetch(self, url: str) -> requests.Response:
+        """Идёт по редиректам вручную, проверяя каждый адрес заново."""
+        current = url
+        for _ in range(MAX_REDIRECTS + 1):
+            ensure_url_allowed(current, self.allow_private)
+            response = self.session.get(
+                current,
+                stream=True,
+                verify=certifi.where(),
+                timeout=30,
+                allow_redirects=False,
+            )
+            if response.status_code not in REDIRECT_STATUSES:
+                return response
+            location = response.headers.get("Location")
+            response.close()
+            if not location:
+                raise UrlBlocked(tr("redirect_no_location"))
+            current = urljoin(current, location)
+        raise UrlBlocked(tr("redirect_too_many", limit=MAX_REDIRECTS))
 
     def localize(self, url: str) -> str:
         if not is_remote(url):
@@ -917,18 +1102,14 @@ class Downloader:
         if canonical in self.cache:
             cached = self.cache[canonical]
             return url if cached is None else cached
+        masked = mask_url(canonical)
         result = url
         proxy_hint = (
             tr("proxy_hint", proxy=self.proxy_label) if self.proxy_label else ""
         )
         response = None
         try:
-            response = self.session.get(
-                canonical,
-                stream=True,
-                verify=certifi.where(),
-                timeout=30,
-            )
+            response = self.fetch(canonical)
             response.raise_for_status()
             content_type = content_type_of(response)
             if content_type not in IMAGE_CONTENT_TYPES:
@@ -946,23 +1127,32 @@ class Downloader:
             relative = relative_path_for_markdown(destination, self.base_dir)
             result = relative
             self.downloaded += 1
-            print(tr("downloaded_file", url=canonical, path=relative))
+            print(tr("downloaded_file", url=masked, path=relative))
         except requests.RequestException as error:
             self.failed += 1
             print(
-                tr("download_failed", url=canonical, error=error, hint=proxy_hint),
+                tr(
+                    "download_failed",
+                    url=masked,
+                    error=safe_error(error, canonical),
+                    hint=proxy_hint,
+                ),
                 file=sys.stderr,
             )
         except DownloadRejected as error:
             self.failed += 1
             print(
-                tr("download_failed", url=canonical, error=error, hint=""),
+                tr("download_failed", url=masked, error=error, hint=""),
                 file=sys.stderr,
             )
         except OSError as error:
             self.failed += 1
             print(
-                tr("save_failed", url=canonical, error=error),
+                tr(
+                    "save_failed",
+                    url=masked,
+                    error=safe_error(error, canonical),
+                ),
                 file=sys.stderr,
             )
         finally:
@@ -1016,6 +1206,11 @@ def main() -> int:
         choices=("in-place", "atomic"),
         default="in-place",
         help=tr("help_write_mode"),
+    )
+    parser.add_argument(
+        "--allow-private",
+        action="store_true",
+        help=tr("help_allow_private"),
     )
     parser.add_argument(
         "--proxy",
@@ -1078,7 +1273,11 @@ def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     session = build_session(proxy)
     try:
         downloader = Downloader(
-            media_dir, source_path.parent, session, proxy_label
+            media_dir,
+            source_path.parent,
+            session,
+            proxy_label,
+            allow_private=args.allow_private,
         )
         try:
             data = source_path.read_bytes()

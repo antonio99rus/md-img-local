@@ -366,7 +366,6 @@ def test_media_path_that_is_a_file_reports_clean_error(
     assert "media" in capsys.readouterr().err.lower()
 
 
-@pytest.mark.xfail(strict=True, reason="unsupported proxy error prints raw credentials")
 def test_proxy_password_not_leaked_on_invalid_scheme(
     run_main, tmp_path, capsys
 ):

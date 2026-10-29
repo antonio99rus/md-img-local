@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import ipaddress
+import socket
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -11,6 +13,7 @@ from helpers import URL, FakeResponse, FakeSession
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = ROOT / "md-img-local.py"
+PUBLIC_TEST_IP = "93.184.216.34"
 
 
 @pytest.fixture(scope="session")
@@ -22,6 +25,31 @@ def script() -> ModuleType:
     sys.modules["md_img_local"] = module
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture(autouse=True)
+def hermetic_dns(script: ModuleType, monkeypatch: pytest.MonkeyPatch):
+    """Не ходит в настоящий DNS: литералы как есть, имена — на публичный IP."""
+
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        if host == "localhost":
+            address = "127.0.0.1"
+        else:
+            try:
+                address = str(ipaddress.ip_address(host))
+            except ValueError:
+                address = PUBLIC_TEST_IP
+        if ":" in address:
+            sockaddr = (address, port or 443, 0, 0)
+            family = socket.AF_INET6
+        else:
+            sockaddr = (address, port or 443)
+            family = socket.AF_INET
+        return [
+            (family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", sockaddr)
+        ]
+
+    monkeypatch.setattr(script.socket, "getaddrinfo", fake_getaddrinfo)
 
 
 @pytest.fixture(autouse=True)

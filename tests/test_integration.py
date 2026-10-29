@@ -53,7 +53,7 @@ def write_md(tmp_path: Path, url: str) -> Path:
 def test_download_without_proxy(script, run_main, tmp_path, image_server, capsys):
     path = write_md(tmp_path, image_server)
 
-    run_main(path)
+    run_main(path, "--allow-private")
 
     output = capsys.readouterr().out
     name = script.filename_for_url(image_server, ".png")
@@ -67,7 +67,7 @@ def test_download_through_socks_proxy(
 ):
     path = write_md(tmp_path, image_server)
 
-    run_main(path, f"--proxy={socks_proxy.url}")
+    run_main(path, f"--proxy={socks_proxy.url}", "--allow-private")
 
     output = capsys.readouterr().out
     name = script.filename_for_url(image_server, ".png")
@@ -84,7 +84,7 @@ def test_unreachable_proxy_keeps_link(
     path = write_md(tmp_path, image_server)
     proxy = f"socks5://127.0.0.1:{free_port()}"
 
-    run_main(path, f"--proxy={proxy}")
+    run_main(path, f"--proxy={proxy}", "--allow-private")
 
     output = capsys.readouterr()
     assert path.read_text(encoding="utf-8") == f"# Заметка\n\n![img]({image_server})\n"
