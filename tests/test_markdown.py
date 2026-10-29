@@ -163,7 +163,7 @@ def test_backup_created_by_default(script, run_main, tmp_path, fake_session):
 def test_no_backup_flag(script, run_main, tmp_path, fake_session):
     path = write_md(tmp_path, f"![a]({URL})\n")
 
-    run_main(path, "--no-backup")
+    run_main(path, "--no-backup", "--force")
 
     assert not path.with_name(f"{path.name}.orig").exists()
     assert local_name(script) in path.read_text(encoding="utf-8")

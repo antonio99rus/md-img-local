@@ -4,6 +4,7 @@ import argparse
 import codecs
 import certifi
 import hashlib
+import json
 import locale
 import mimetypes
 import os
@@ -77,6 +78,10 @@ MESSAGES: dict[str, dict[str, str]] = {
             "hardlinks, atomic replaces the file via a temporary file "
             "(default: in-place)"
         ),
+        "no_backup_requires_force": (
+            "--no-backup with in-place writes requires --force: without a "
+            "backup an interrupted write cannot be recovered"
+        ),
         "help_proxy": (
             "Proxy to download through: http, https, socks4, socks4a, socks5, "
             "socks5h (port required), e.g. socks5://127.0.0.1:3066. "
@@ -111,6 +116,23 @@ MESSAGES: dict[str, dict[str, str]] = {
         "proxy_banner": "[PROXY] {proxy}",
         "backup": "[BACKUP] {source} -> {backup}",
         "backup_rotated": "[BACKUP] rotated {backup} -> {path}",
+        "no_backup_label": "no backup",
+        "journal_found": (
+            "interrupted write detected: {journal}; previous version: {backup}. "
+            "Check the file or pass --force to discard the journal"
+        ),
+        "write_locked": (
+            "cannot lock {path}: {error}. Is another copy of this program running?"
+        ),
+        "write_conflict": (
+            "file changed while preparing the write: {path}; nothing was written"
+        ),
+        "write_verify_failed": (
+            "verification failed for {path}; restored from {backup}"
+        ),
+        "write_no_recovery": (
+            "write to {path} failed and no backup is available to restore it"
+        ),
         "downloaded_file": "[OK] {url} -> {path}",
         "download_failed": "[ERROR] Failed to download {url}: {error}{hint}",
         "save_failed": "[ERROR] Failed to save {url}: {error}",
@@ -137,6 +159,10 @@ MESSAGES: dict[str, dict[str, str]] = {
             "Способ записи результата: in-place сохраняет inode и hardlinks, "
             "atomic заменяет файл через временный "
             "(по умолчанию — in-place)"
+        ),
+        "no_backup_requires_force": (
+            "--no-backup при записи in-place требует --force: без резервной "
+            "копии прерванную запись не из чего восстановить"
         ),
         "help_proxy": (
             "Прокси для скачивания: http, https, socks4, socks4a, socks5, socks5h "
@@ -176,6 +202,25 @@ MESSAGES: dict[str, dict[str, str]] = {
         "proxy_banner": "[PROXY] {proxy}",
         "backup": "[BACKUP] {source} -> {backup}",
         "backup_rotated": "[BACKUP] прежняя копия {backup} -> {path}",
+        "no_backup_label": "бэкапа нет",
+        "journal_found": (
+            "обнаружена незавершённая запись: {journal}; прежняя версия: "
+            "{backup}. Проверьте файл или укажите --force, чтобы отбросить журнал"
+        ),
+        "write_locked": (
+            "не удалось заблокировать {path}: {error}. "
+            "Возможно, уже запущена другая копия программы"
+        ),
+        "write_conflict": (
+            "файл изменился во время подготовки записи: {path}; "
+            "ничего не записано"
+        ),
+        "write_verify_failed": (
+            "проверка записи не удалась для {path}; восстановлено из {backup}"
+        ),
+        "write_no_recovery": (
+            "запись в {path} не удалась, а резервной копии для восстановления нет"
+        ),
         "downloaded_file": "[OK] {url} -> {path}",
         "download_failed": "[ERROR] Не удалось скачать {url}: {error}{hint}",
         "save_failed": "[ERROR] Не удалось сохранить {url}: {error}",
@@ -445,12 +490,31 @@ def make_backup(
     return backup_path, rotated_path
 
 
-def write_markdown(source_path: Path, data: bytes, mode: str) -> None:
+class WriteError(Exception):
+    """Ошибка безопасной записи, которую нужно показать без трейсбека."""
+
+
+_WINDOWS_LOCK_OFFSET = 0x40000000
+
+
+def write_markdown(
+    source_path: Path,
+    data: bytes,
+    mode: str,
+    *,
+    force: bool = False,
+    backup_path: Path | None = None,
+) -> None:
     """Пишет результат в файл выбранным способом."""
     if mode == "atomic":
         _write_atomic(source_path, data)
     else:
-        source_path.write_bytes(data)
+        _write_in_place(
+            source_path,
+            data,
+            force=force,
+            backup_path=backup_path,
+        )
 
 
 def _write_atomic(source_path: Path, data: bytes) -> None:
@@ -471,6 +535,180 @@ def _write_atomic(source_path: Path, data: bytes) -> None:
     except BaseException:
         temp_path.unlink(missing_ok=True)
         raise
+
+
+def _sidecar_path(source_path: Path, kind: str) -> Path:
+    return source_path.with_name(f".{source_path.name}.md-img-{kind}")
+
+
+def _backup_label(backup_path: Path | None) -> str:
+    return backup_path.name if backup_path else tr("no_backup_label")
+
+
+def _file_snapshot(descriptor: int) -> tuple[int, int, int, int]:
+    info = os.fstat(descriptor)
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
+def _write_all(descriptor: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        view = view[os.write(descriptor, view):]
+
+
+def _read_all(descriptor: int) -> bytes:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(descriptor, 1024 * 1024)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
+def _write_file_sync(path: Path, data: bytes) -> None:
+    with open(path, "wb") as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def _acquire_lock(descriptor: int, source_path: Path) -> None:
+    """Берёт advisory lock; чужие процессы могут его игнорировать."""
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            # Блокировки Windows мандатные: лок на первом байте мешал бы
+            # даже читать файл, поэтому запираем байт далеко за EOF.
+            os.lseek(descriptor, _WINDOWS_LOCK_OFFSET, os.SEEK_SET)
+            try:
+                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+            finally:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+        else:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as error:
+        raise WriteError(
+            tr("write_locked", path=source_path, error=error)
+        ) from error
+
+
+def _write_journal(
+    journal_path: Path,
+    source_path: Path,
+    staged_path: Path,
+    backup_path: Path | None,
+    snapshot: tuple[int, int, int, int],
+    data: bytes,
+) -> None:
+    device, inode, size, mtime_ns = snapshot
+    payload = {
+        "source": str(source_path),
+        "staged": str(staged_path),
+        "backup": str(backup_path) if backup_path else None,
+        "st_dev": device,
+        "st_ino": inode,
+        "st_size": size,
+        "st_mtime_ns": mtime_ns,
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
+    journal = json.dumps(payload, ensure_ascii=False, indent=2)
+    _write_file_sync(journal_path, journal.encode("utf-8"))
+
+
+def _restore_from_backup(
+    descriptor: int, backup_path: Path | None
+) -> bool:
+    """Возвращает исходное содержимое из .orig через тот же дескриптор."""
+    if backup_path is None or not backup_path.exists():
+        return False
+    original = backup_path.read_bytes()
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    _write_all(descriptor, original)
+    os.ftruncate(descriptor, len(original))
+    os.fsync(descriptor)
+    return True
+
+
+def _discard(*paths: Path) -> None:
+    for path in paths:
+        path.unlink(missing_ok=True)
+
+
+def _open_for_writing(path: Path) -> int:
+    flags = os.O_RDWR
+    # Windows CRT открывает файл в текстовом режиме без O_BINARY.
+    flags |= getattr(os, "O_BINARY", 0)
+    return os.open(path, flags)
+
+
+def _write_in_place(
+    source_path: Path,
+    data: bytes,
+    *,
+    force: bool,
+    backup_path: Path | None,
+) -> None:
+    """Пишет в существующий файл, сохраняя inode, с journal и проверкой."""
+    journal_path = _sidecar_path(source_path, "journal")
+    staged_path = _sidecar_path(source_path, "new")
+    if journal_path.exists():
+        if not force:
+            raise WriteError(
+                tr(
+                    "journal_found",
+                    journal=journal_path.name,
+                    backup=_backup_label(backup_path),
+                )
+            )
+        _discard(journal_path, staged_path)
+
+    descriptor = _open_for_writing(source_path)
+    modified = False
+    try:
+        _acquire_lock(descriptor, source_path)
+        snapshot = _file_snapshot(descriptor)
+        _write_file_sync(staged_path, data)
+        _write_journal(
+            journal_path,
+            source_path,
+            staged_path,
+            backup_path,
+            snapshot,
+            data,
+        )
+        if _file_snapshot(descriptor) != snapshot:
+            raise WriteError(tr("write_conflict", path=source_path))
+
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        modified = True
+        _write_all(descriptor, data)
+        os.ftruncate(descriptor, len(data))
+        os.fsync(descriptor)
+        digest = hashlib.sha256(_read_all(descriptor)).hexdigest()
+        if digest != hashlib.sha256(data).hexdigest():
+            raise WriteError(
+                tr(
+                    "write_verify_failed",
+                    path=source_path,
+                    backup=_backup_label(backup_path),
+                )
+            )
+    except BaseException as error:
+        if modified and not _restore_from_backup(descriptor, backup_path):
+            _discard(journal_path, staged_path)
+            raise WriteError(
+                tr("write_no_recovery", path=source_path)
+            ) from error
+        _discard(journal_path, staged_path)
+        raise
+    else:
+        _discard(journal_path, staged_path)
+    finally:
+        os.close(descriptor)
 
 
 def _protect_fenced_code(text: str, stash: Callable[[str], str]) -> str:
@@ -640,6 +878,9 @@ def main() -> None:
     if args.lang:
         set_language(args.lang)
 
+    if args.no_backup and not args.force and args.write_mode == "in-place":
+        parser.error(tr("no_backup_requires_force"))
+
     try:
         proxy = parse_proxy(args.proxy)
         if proxy:
@@ -737,6 +978,7 @@ def main() -> None:
     new_text = REF_DEF_RE.sub(drop_used_definitions, new_text)
     new_text = restore_markdown_regions(new_text, protected_regions)
 
+    backup_path: Path | None = None
     if not args.no_backup:
         backup_path, rotated_path = make_backup(source_path, args.force)
         if rotated_path is not None:
@@ -748,11 +990,16 @@ def main() -> None:
                 )
             )
         print(tr("backup", source=source_path.name, backup=backup_path.name))
-    write_markdown(
-        source_path,
-        encode_markdown(new_text, encoding, bom),
-        args.write_mode,
-    )
+    try:
+        write_markdown(
+            source_path,
+            encode_markdown(new_text, encoding, bom),
+            args.write_mode,
+            force=args.force,
+            backup_path=backup_path,
+        )
+    except WriteError as error:
+        parser.error(str(error))
 
     print(tr("result", path=source_path))
     print(tr("found", count=len(found_urls)))
