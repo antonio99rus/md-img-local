@@ -162,10 +162,20 @@ def test_failed_download_keeps_link_and_counts_error(
     run_main(path)
 
     text = path.read_text(encoding="utf-8")
-    output = capsys.readouterr().out
+    captured = capsys.readouterr()
     assert text == f"![a]({URL})\n"
-    assert "Errors: 1" in output
-    assert "[ERROR]" in output
+    assert "Errors: 1" in captured.out
+    assert "[ERROR]" in captured.err
+
+
+def test_media_dir_is_not_created_without_images(
+    run_main, tmp_path, fake_session
+):
+    path = write_md(tmp_path, "# просто текст\n")
+
+    assert run_main(path) == 0
+
+    assert not (tmp_path / "media").exists()
 
 
 def test_backup_created_by_default(script, run_main, tmp_path, fake_session):

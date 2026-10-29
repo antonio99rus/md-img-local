@@ -78,3 +78,41 @@ def test_missing_argument_exits_with_usage():
 def test_version_matches_pyproject(script):
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert project["project"]["version"] == script.VERSION
+
+
+def test_failed_download_exits_with_code_1(tmp_path):
+    path = tmp_path / "note.md"
+    path.write_text(
+        "![a](http://127.0.0.1:1/missing.png)\n", encoding="utf-8"
+    )
+
+    result = run_cli(str(path))
+
+    assert result.returncode == 1
+    assert "Errors: 1" in result.stdout
+
+
+def test_media_file_exits_with_code_2(tmp_path):
+    path = tmp_path / "note.md"
+    path.write_text("![a](http://example.com/img.png)\n", encoding="utf-8")
+    media = tmp_path / "media"
+    media.write_text("not a directory", encoding="utf-8")
+
+    result = run_cli(str(path), f"--media={media}")
+
+    assert result.returncode == 2
+    assert "not a directory" in result.stderr
+
+
+def test_output_is_utf8_without_pythonioencoding():
+    env = dict(os.environ, MD_IMG_LOCAL_LANG="ru")
+    env.pop("PYTHONIOENCODING", None)
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--help"],
+        capture_output=True,
+        env=env,
+    )
+
+    assert result.returncode == 0
+    assert "использование:" in result.stdout.decode("utf-8")

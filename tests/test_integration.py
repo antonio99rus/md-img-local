@@ -86,9 +86,9 @@ def test_unreachable_proxy_keeps_link(
 
     run_main(path, f"--proxy={proxy}")
 
-    output = capsys.readouterr().out
+    output = capsys.readouterr()
     assert path.read_text(encoding="utf-8") == f"# Заметка\n\n![img]({image_server})\n"
-    assert "Downloaded: 0" in output
-    assert "Errors: 1" in output
-    assert proxy in output
-    assert "unreachable?" in output
+    assert "Downloaded: 0" in output.out
+    assert "Errors: 1" in output.out
+    assert proxy in output.err
+    assert "unreachable?" in output.err

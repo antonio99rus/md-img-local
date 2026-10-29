@@ -50,8 +50,8 @@ def fake_session(script: ModuleType, monkeypatch: pytest.MonkeyPatch) -> FakeSes
 def run_main(script: ModuleType, monkeypatch: pytest.MonkeyPatch):
     """Запускает main() с заданными аргументами командной строки."""
 
-    def run(*argv: str) -> None:
+    def run(*argv: str) -> int:
         monkeypatch.setattr(sys, "argv", ["md-img-local.py", *map(str, argv)])
-        script.main()
+        return script.main()
 
     return run

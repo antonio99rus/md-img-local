@@ -337,20 +337,21 @@ def test_cp1251_file_reports_clean_error(run_main, tmp_path, capsys):
     assert not (tmp_path / "note.md.orig").exists()
 
 
-@pytest.mark.xfail(strict=True, reason="failures do not affect the exit code")
+def test_exit_code_is_zero_on_success(run_main, tmp_path, fake_session):
+    path = write_md(tmp_path, f"![a]({URL})\n")
+
+    assert run_main(path) == 0
+
+
 def test_exit_code_is_nonzero_when_downloads_fail(
     run_main, tmp_path, fake_session
 ):
     fake_session.responses[URL] = requests.ConnectionError("boom")
     path = write_md(tmp_path, f"![a]({URL})\n")
 
-    with pytest.raises(SystemExit) as error:
-        run_main(path)
-
-    assert error.value.code == 1
+    assert run_main(path) == 1
 
 
-@pytest.mark.xfail(strict=True, reason="media path that is a file raises FileExistsError")
 def test_media_path_that_is_a_file_reports_clean_error(
     run_main, tmp_path, capsys
 ):

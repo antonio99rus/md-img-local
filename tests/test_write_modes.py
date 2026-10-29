@@ -96,7 +96,7 @@ def test_atomic_write_mode_leaves_no_temp_files(
 
 
 def test_atomic_write_mode_keeps_source_on_failure(
-    script, monkeypatch, run_main, tmp_path, fake_session
+    script, monkeypatch, run_main, tmp_path, fake_session, capsys
 ):
     original = f"![a]({URL})\n"
     path = write_md(tmp_path, original)
@@ -106,9 +106,11 @@ def test_atomic_write_mode_keeps_source_on_failure(
 
     monkeypatch.setattr(script.os, "replace", broken_replace)
 
-    with pytest.raises(OSError):
+    with pytest.raises(SystemExit) as error:
         run_main(path, "--write-mode=atomic")
 
+    assert error.value.code == 2
+    assert "replace failed" in capsys.readouterr().err
     assert path.read_text(encoding="utf-8") == original
     assert temp_files(tmp_path) == []
 

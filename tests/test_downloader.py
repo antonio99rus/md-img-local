@@ -78,7 +78,7 @@ def test_localize_rejects_missing_content_type(script, tmp_path, capsys):
     result = make_downloader(script, tmp_path, session).localize(url)
 
     assert result == url
-    assert "Content-Type" in capsys.readouterr().out
+    assert "Content-Type" in capsys.readouterr().err
     assert list((tmp_path / "media").iterdir()) == []
 
 
@@ -106,7 +106,7 @@ def test_localize_reports_connection_error_with_proxy_hint(script, tmp_path, cap
 
     result = downloader.localize(url)
 
-    output = capsys.readouterr().out
+    output = capsys.readouterr().err
     assert result == url
     assert downloader.failed == 1
     assert "[ERROR]" in output
@@ -120,7 +120,7 @@ def test_localize_reports_http_error_without_hint(script, tmp_path, capsys):
 
     result = make_downloader(script, tmp_path, session).localize(url)
 
-    output = capsys.readouterr().out
+    output = capsys.readouterr().err
     assert result == url
     assert "HTTP 404" in output
     assert "proxy" not in output
@@ -138,7 +138,7 @@ def test_localize_reports_write_error(script, tmp_path, capsys, monkeypatch):
     result = make_downloader(script, tmp_path, session).localize(url)
 
     assert result == url
-    assert "Failed to save" in capsys.readouterr().out
+    assert "Failed to save" in capsys.readouterr().err
 
 
 def test_build_session_limits_redirects(script):

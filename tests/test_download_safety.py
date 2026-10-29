@@ -54,7 +54,7 @@ def test_non_image_content_type_is_rejected(
 
     assert result == url
     assert downloader.failed == 1
-    assert "not an allowed image type" in capsys.readouterr().out
+    assert "not an allowed image type" in capsys.readouterr().err
     assert media_files(tmp_path) == []
 
 
@@ -90,7 +90,7 @@ def test_declared_oversize_is_rejected_before_reading(
 
     assert result == URL
     assert downloader.failed == 1
-    assert "too large" in capsys.readouterr().out
+    assert "too large" in capsys.readouterr().err
     assert media_files(tmp_path) == []
 
 
@@ -105,7 +105,7 @@ def test_streamed_oversize_is_rejected(
 
     assert result == URL
     assert downloader.failed == 1
-    assert "too large" in capsys.readouterr().out
+    assert "too large" in capsys.readouterr().err
     assert media_files(tmp_path) == []
 
 
@@ -160,7 +160,7 @@ def test_failed_store_leaves_no_partial_file(
 
     assert result == URL
     assert media_files(tmp_path) == []
-    assert "Failed to save" in capsys.readouterr().out
+    assert "Failed to save" in capsys.readouterr().err
 
 
 def test_symlink_at_destination_is_replaced(script, tmp_path):

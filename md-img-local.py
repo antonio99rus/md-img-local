@@ -126,6 +126,9 @@ MESSAGES: dict[str, dict[str, str]] = {
         "options_title": "options",
         "error_prefix": "error",
         "file_not_found": "file not found: {path}",
+        "read_error": "cannot read {path}: {error}",
+        "media_not_directory": "media path is not a directory: {path}",
+        "unexpected_error": "cannot complete: {error}",
         "encoding_error": (
             "cannot decode {path} as UTF-8/UTF-16/UTF-32: {error}"
         ),
@@ -215,6 +218,9 @@ MESSAGES: dict[str, dict[str, str]] = {
         "options_title": "параметры",
         "error_prefix": "ошибка",
         "file_not_found": "файл не найден: {path}",
+        "read_error": "не удалось прочитать {path}: {error}",
+        "media_not_directory": "путь media не является каталогом: {path}",
+        "unexpected_error": "не удалось выполнить: {error}",
         "encoding_error": (
             "не удалось декодировать {path} как UTF-8/UTF-16/UTF-32: {error}"
         ),
@@ -497,6 +503,7 @@ def read_limited(response: requests.Response, limit: int) -> bytes:
 
 def store_download(media_dir: Path, destination: Path, data: bytes) -> None:
     """Пишет через уникальный temp и os.replace, не следуя симлинкам."""
+    media_dir.mkdir(parents=True, exist_ok=True)
     descriptor, temp_name = tempfile.mkstemp(
         prefix=".md-img-local-",
         suffix=".part",
@@ -943,14 +950,21 @@ class Downloader:
         except requests.RequestException as error:
             self.failed += 1
             print(
-                tr("download_failed", url=canonical, error=error, hint=proxy_hint)
+                tr("download_failed", url=canonical, error=error, hint=proxy_hint),
+                file=sys.stderr,
             )
         except DownloadRejected as error:
             self.failed += 1
-            print(tr("download_failed", url=canonical, error=error, hint=""))
+            print(
+                tr("download_failed", url=canonical, error=error, hint=""),
+                file=sys.stderr,
+            )
         except OSError as error:
             self.failed += 1
-            print(tr("save_failed", url=canonical, error=error))
+            print(
+                tr("save_failed", url=canonical, error=error),
+                file=sys.stderr,
+            )
         finally:
             if response is not None:
                 response.close()
@@ -958,7 +972,20 @@ class Downloader:
         return result
 
 
-def main() -> None:
+def configure_output() -> None:
+    """Делает вывод читаемым при перенаправлении на любой консоли."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            continue
+
+
+def main() -> int:
+    configure_output()
     set_language(detect_language(language_from_argv(sys.argv[1:])))
 
     parser = LocalizedArgumentParser(
@@ -1013,6 +1040,14 @@ def main() -> None:
     if args.lang:
         set_language(args.lang)
 
+    try:
+        return run(args, parser)
+    except (OSError, ValueError) as error:
+        parser.error(tr("unexpected_error", error=error))
+    return 2
+
+
+def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     if args.no_backup and not args.force and args.write_mode == "in-place":
         parser.error(tr("no_backup_requires_force"))
 
@@ -1025,26 +1060,56 @@ def main() -> None:
 
     proxy_label = mask_proxy(proxy) if proxy else None
 
-    source_path = args.markdown.resolve()
+    source_path = args.markdown.expanduser().resolve()
     if not source_path.is_file():
         parser.error(tr("file_not_found", path=source_path))
 
     media_dir = (
-        args.media.resolve()
+        args.media.expanduser().resolve()
         if args.media
         else source_path.parent / "media"
     )
-    media_dir.mkdir(parents=True, exist_ok=True)
+    if media_dir.exists() and not media_dir.is_dir():
+        parser.error(tr("media_not_directory", path=media_dir))
 
     if proxy_label:
         print(tr("proxy_banner", proxy=proxy_label))
 
     session = build_session(proxy)
-    downloader = Downloader(media_dir, source_path.parent, session, proxy_label)
     try:
-        text, encoding, bom = decode_markdown(source_path.read_bytes())
-    except UnicodeDecodeError as error:
-        parser.error(tr("encoding_error", path=source_path, error=error))
+        downloader = Downloader(
+            media_dir, source_path.parent, session, proxy_label
+        )
+        try:
+            data = source_path.read_bytes()
+        except OSError as error:
+            parser.error(tr("read_error", path=source_path, error=error))
+        try:
+            text, encoding, bom = decode_markdown(data)
+        except UnicodeDecodeError as error:
+            parser.error(tr("encoding_error", path=source_path, error=error))
+        return process(
+            args,
+            parser,
+            source_path,
+            downloader,
+            text,
+            encoding,
+            bom,
+        )
+    finally:
+        session.close()
+
+
+def process(
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+    source_path: Path,
+    downloader: Downloader,
+    text: str,
+    encoding: str,
+    bom: bytes,
+) -> int:
     protected_text, protected_regions = protect_markdown_regions(text)
 
     found_urls: set[str] = set()
@@ -1141,8 +1206,8 @@ def main() -> None:
     print(tr("downloaded", count=downloader.downloaded))
     print(tr("failed", count=downloader.failed))
 
-    session.close()
+    return 1 if downloader.failed else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
