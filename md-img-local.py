@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import codecs
-import certifi
 import hashlib
 import ipaddress
 import json
@@ -11,6 +10,7 @@ import os
 import re
 import shutil
 import socket
+import ssl
 import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
@@ -20,7 +20,6 @@ from urllib.parse import quote, urljoin, urlparse, urlsplit, urlunsplit, unquote
 import requests
 
 import truststore
-truststore.inject_into_ssl()
 
 INLINE_IMAGE_RE = re.compile(
     r'!\[([^\]]*)\]\(\s*(?:<([^>]+)>|(\S+?))'
@@ -1082,7 +1081,7 @@ class Downloader:
             response = self.session.get(
                 current,
                 stream=True,
-                verify=certifi.where(),
+                verify=True,
                 timeout=30,
                 allow_redirects=False,
             )
@@ -1162,6 +1161,13 @@ class Downloader:
         return result
 
 
+def configure_tls() -> None:
+    """Подключает системное хранилище сертификатов вместо бандла certifi."""
+    if ssl.SSLContext is truststore.SSLContext:
+        return
+    truststore.inject_into_ssl()
+
+
 def configure_output() -> None:
     """Делает вывод читаемым при перенаправлении на любой консоли."""
     for stream in (sys.stdout, sys.stderr):
@@ -1175,6 +1181,7 @@ def configure_output() -> None:
 
 
 def main() -> int:
+    configure_tls()
     configure_output()
     set_language(detect_language(language_from_argv(sys.argv[1:])))
 

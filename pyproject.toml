@@ -6,7 +6,6 @@ readme = "README-EN-US.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 dependencies = [
-    "certifi>=2023.7.22",
     "requests[socks]>=2.31",
     "truststore>=0.8",
 ]

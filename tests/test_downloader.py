@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import certifi
 import pytest
 import requests
 
@@ -35,9 +34,10 @@ def test_localize_passes_expected_request_options(script, tmp_path):
     make_downloader(script, tmp_path, session).localize(url)
 
     _, kwargs = session.calls[0]
-    assert kwargs["verify"] == certifi.where()
+    assert kwargs["verify"] is True
     assert kwargs["timeout"] == 30
     assert kwargs["stream"] is True
+    assert kwargs["allow_redirects"] is False
 
 
 def test_localize_dedupes_same_url(script, tmp_path):
