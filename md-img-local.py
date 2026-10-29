@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from urllib.parse import quote, urlparse, urlsplit, unquote
@@ -71,6 +72,11 @@ MESSAGES: dict[str, dict[str, str]] = {
         "help_force": (
             "Overwrite an existing file.md.orig instead of rotating it"
         ),
+        "help_write_mode": (
+            "How to write the result: in-place keeps the file inode and "
+            "hardlinks, atomic replaces the file via a temporary file "
+            "(default: in-place)"
+        ),
         "help_proxy": (
             "Proxy to download through: http, https, socks4, socks4a, socks5, "
             "socks5h (port required), e.g. socks5://127.0.0.1:3066. "
@@ -126,6 +132,11 @@ MESSAGES: dict[str, dict[str, str]] = {
         "help_no_backup": "Не создавать резервную копию файла.md.orig",
         "help_force": (
             "Перезаписывать существующий файл.md.orig вместо ротации"
+        ),
+        "help_write_mode": (
+            "Способ записи результата: in-place сохраняет inode и hardlinks, "
+            "atomic заменяет файл через временный "
+            "(по умолчанию — in-place)"
         ),
         "help_proxy": (
             "Прокси для скачивания: http, https, socks4, socks4a, socks5, socks5h "
@@ -434,6 +445,34 @@ def make_backup(
     return backup_path, rotated_path
 
 
+def write_markdown(source_path: Path, data: bytes, mode: str) -> None:
+    """Пишет результат в файл выбранным способом."""
+    if mode == "atomic":
+        _write_atomic(source_path, data)
+    else:
+        source_path.write_bytes(data)
+
+
+def _write_atomic(source_path: Path, data: bytes) -> None:
+    """Пишет во временный файл рядом и атомарно подменяет исходник."""
+    descriptor, temp_name = tempfile.mkstemp(
+        prefix=f".{source_path.name}.",
+        suffix=".tmp",
+        dir=source_path.parent,
+    )
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        shutil.copystat(source_path, temp_path)
+        os.replace(temp_path, source_path)
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
 def _protect_fenced_code(text: str, stash: Callable[[str], str]) -> str:
     lines = text.splitlines(keepends=True)
     result: list[str] = []
@@ -573,6 +612,12 @@ def main() -> None:
         help=tr("help_force"),
     )
     parser.add_argument(
+        "--write-mode",
+        choices=("in-place", "atomic"),
+        default="in-place",
+        help=tr("help_write_mode"),
+    )
+    parser.add_argument(
         "--proxy",
         default=None,
         metavar="URL",
@@ -703,7 +748,11 @@ def main() -> None:
                 )
             )
         print(tr("backup", source=source_path.name, backup=backup_path.name))
-    source_path.write_bytes(encode_markdown(new_text, encoding, bom))
+    write_markdown(
+        source_path,
+        encode_markdown(new_text, encoding, bom),
+        args.write_mode,
+    )
 
     print(tr("result", path=source_path))
     print(tr("found", count=len(found_urls)))

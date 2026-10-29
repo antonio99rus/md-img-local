@@ -136,6 +136,7 @@ def test_all_languages_cover_required_messages(script):
         "help_media",
         "help_no_backup",
         "help_force",
+        "help_write_mode",
         "help_proxy",
         "help_lang",
         "help_version",
