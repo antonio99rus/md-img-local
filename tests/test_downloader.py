@@ -160,25 +160,97 @@ def test_filename_for_url_is_deterministic(script):
 
 
 @pytest.mark.parametrize(
-    ("url", "headers", "expected"),
+    ("content_type", "expected"),
     [
-        ("http://example.com/pic.PNG", {}, ".png"),
-        ("http://example.com/pic.php", {}, ".php"),
-        ("http://example.com/archive.tar.gz", {}, ".gz"),
-        ("http://example.com/pic.verylongextension", {}, ".bin"),
-        (
-            "http://example.com/pic.verylongextension",
-            {"Content-Type": "image/jpeg"},
-            ".jpg",
-        ),
-        (
-            "http://example.com/download",
-            {"Content-Type": "image/jpeg; charset=x"},
-            ".jpg",
-        ),
-        ("http://example.com/download", {}, ".bin"),
+        ("image/png", ".png"),
+        ("image/jpeg", ".jpg"),
+        ("image/PNG", ".png"),
+        ("image/vnd.microsoft.icon", ".ico"),
+        ("image/svg+xml", ".bin"),
+        ("text/html", ".bin"),
+        ("", ".bin"),
     ],
 )
-def test_extension_from_response(script, url, headers, expected):
-    response = FakeResponse(headers=headers)
-    assert script.extension_from_response(response, url) == expected
+def test_extension_for_content_type(script, content_type, expected):
+    assert script.extension_for_content_type(content_type) == expected
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("http://example.com/a.png", "http://example.com/a.png"),
+        ("http://Example.COM/a.png#frag", "http://example.com/a.png"),
+        ("HTTPS://Example.com:443/a.png", "https://example.com/a.png"),
+        ("http://example.com:80/a.png", "http://example.com/a.png"),
+        ("http://example.com:8080/a.png", "http://example.com:8080/a.png"),
+        ("http://example.com/a.png?x=1#f", "http://example.com/a.png?x=1"),
+        (
+            "http://user:pw@Example.com/a.png",
+            "http://user:pw@example.com/a.png",
+        ),
+        ("http://[::1]/a.png#x", "http://[::1]/a.png"),
+        ("not a url", "not a url"),
+    ],
+)
+def test_canonical_url(script, url, expected):
+    assert script.canonical_url(url) == expected
+
+
+def test_localize_dedupes_urls_differing_by_fragment(script, tmp_path):
+    base = "http://example.com/pic.png"
+    session = FakeSession({base: FakeResponse()})
+    downloader = make_downloader(script, tmp_path, session)
+
+    first = downloader.localize(f"{base}#one")
+    second = downloader.localize(f"{base}#two")
+
+    assert first == second
+    assert len(session.calls) == 1
+    assert session.calls[0][0] == base
+
+
+def test_localize_returns_original_url_after_cached_failure(script, tmp_path):
+    base = "http://example.com/pic.png"
+    session = FakeSession({base: FakeResponse(status_code=404)})
+    downloader = make_downloader(script, tmp_path, session)
+
+    first = downloader.localize(f"{base}#one")
+    second = downloader.localize(f"{base}#two")
+
+    assert first == f"{base}#one"
+    assert second == f"{base}#two"
+    assert len(session.calls) == 1
+
+
+def test_filename_for_url_limits_stem_length(script):
+    url = "http://example.com/" + "a" * 300 + ".png"
+
+    name = script.filename_for_url(url, ".png")
+
+    stem = name.rsplit("-", 1)[0]
+    assert len(stem) <= script.FILENAME_STEM_LIMIT
+    assert len(name) <= script.FILENAME_STEM_LIMIT + 1 + 16 + 4
+
+
+def test_filename_for_url_uses_long_hash(script):
+    name = script.filename_for_url("http://example.com/a.png", ".png")
+
+    hash_part = name.rsplit("-", 1)[1].removesuffix(".png")
+    assert len(hash_part) == script.URL_HASH_LENGTH
+    assert all(char in "0123456789abcdef" for char in hash_part)
+
+
+def test_filename_for_url_keeps_unicode_stem(script):
+    name = script.filename_for_url("http://example.com/картинка.png", ".png")
+
+    assert name.startswith("картинка-")
+
+
+@pytest.mark.parametrize("reserved", ["CON", "nul", "COM1", "LPT9"])
+def test_filename_for_url_escapes_windows_reserved_names(script, reserved):
+    name = script.filename_for_url(
+        f"http://example.com/{reserved}.png", ".png"
+    )
+
+    stem = name.rsplit("-", 1)[0]
+    assert stem.lower() not in script.WINDOWS_RESERVED_NAMES

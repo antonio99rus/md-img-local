@@ -6,7 +6,6 @@ import certifi
 import hashlib
 import json
 import locale
-import mimetypes
 import os
 import re
 import shutil
@@ -14,7 +13,7 @@ import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from urllib.parse import quote, urlparse, urlsplit, unquote
+from urllib.parse import quote, urlparse, urlsplit, urlunsplit, unquote
 
 import requests
 
@@ -68,6 +67,20 @@ IMAGE_CONTENT_TYPES = {
     "image/x-icon": ".ico",
     "image/vnd.microsoft.icon": ".ico",
 }
+
+DEFAULT_PORTS = {"http": 80, "https": 443}
+FILENAME_STEM_LIMIT = 80
+URL_HASH_LENGTH = 16
+WINDOWS_RESERVED_NAMES = frozenset(
+    {
+        "con",
+        "prn",
+        "aux",
+        "nul",
+        *(f"com{index}" for index in range(1, 10)),
+        *(f"lpt{index}" for index in range(1, 10)),
+    }
+)
 
 # UA = "markdown-image-downloader/1.0"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
@@ -501,22 +514,47 @@ def store_download(media_dir: Path, destination: Path, data: bytes) -> None:
         raise
 
 
-def extension_from_response(response: requests.Response, url: str) -> str:
-    path = unquote(urlparse(url).path)
-    suffix = Path(path).suffix.lower()
-    if suffix and re.fullmatch(r"\.[a-z0-9]{1,8}", suffix):
-        return suffix
-    content_type = response.headers.get("Content-Type", "").split(";")[0].strip()
-    extension = mimetypes.guess_extension(content_type)
-    return extension or ".bin"
+def extension_for_content_type(content_type: str) -> str:
+    """Расширение по фиксированной таблице, без зависимости от ОС."""
+    return IMAGE_CONTENT_TYPES.get(content_type.lower(), ".bin")
+
+
+def canonical_url(url: str) -> str:
+    """Убирает fragment и нормализует схему, хост и порт по умолчанию."""
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        return url
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname
+    if not host:
+        return url
+    if port is not None and DEFAULT_PORTS.get(scheme) == port:
+        port = None
+    netloc = f"[{host}]" if ":" in host else host
+    if parsed.username is not None:
+        userinfo = parsed.username
+        if parsed.password is not None:
+            userinfo = f"{userinfo}:{parsed.password}"
+        netloc = f"{userinfo}@{netloc}"
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+    return urlunsplit((scheme, netloc, parsed.path, parsed.query, ""))
 
 
 def filename_for_url(url: str, extension: str) -> str:
-    parsed = urlparse(url)
+    canonical = canonical_url(url)
+    parsed = urlparse(canonical)
     original_name = Path(unquote(parsed.path)).stem
-    original_name = re.sub(r"[^a-zA-Zа-яА-Я0-9._-]+", "_", original_name)
+    original_name = re.sub(r"[^\w-]+", "_", original_name)
     original_name = original_name.strip("._-") or "image"
-    url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()[:10]
+    original_name = original_name[:FILENAME_STEM_LIMIT]
+    if original_name.lower() in WINDOWS_RESERVED_NAMES:
+        original_name = f"{original_name}_"
+    url_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[
+        :URL_HASH_LENGTH
+    ]
     return f"{original_name}-{url_hash}{extension}"
 
 
@@ -868,8 +906,10 @@ class Downloader:
     def localize(self, url: str) -> str:
         if not is_remote(url):
             return url
-        if url in self.cache:
-            return self.cache[url]
+        canonical = canonical_url(url)
+        if canonical in self.cache:
+            cached = self.cache[canonical]
+            return url if cached is None else cached
         result = url
         proxy_hint = (
             tr("proxy_hint", proxy=self.proxy_label) if self.proxy_label else ""
@@ -877,7 +917,7 @@ class Downloader:
         response = None
         try:
             response = self.session.get(
-                url,
+                canonical,
                 stream=True,
                 verify=certifi.where(),
                 timeout=30,
@@ -892,27 +932,29 @@ class Downloader:
                     )
                 )
             data = read_limited(response, MAX_DOWNLOAD_BYTES)
-            extension = extension_from_response(response, url)
-            filename = filename_for_url(url, extension)
+            extension = extension_for_content_type(content_type)
+            filename = filename_for_url(canonical, extension)
             destination = self.media_dir / filename
             store_download(self.media_dir, destination, data)
             relative = relative_path_for_markdown(destination, self.base_dir)
             result = relative
             self.downloaded += 1
-            print(tr("downloaded_file", url=url, path=relative))
+            print(tr("downloaded_file", url=canonical, path=relative))
         except requests.RequestException as error:
             self.failed += 1
-            print(tr("download_failed", url=url, error=error, hint=proxy_hint))
+            print(
+                tr("download_failed", url=canonical, error=error, hint=proxy_hint)
+            )
         except DownloadRejected as error:
             self.failed += 1
-            print(tr("download_failed", url=url, error=error, hint=""))
+            print(tr("download_failed", url=canonical, error=error, hint=""))
         except OSError as error:
             self.failed += 1
-            print(tr("save_failed", url=url, error=error))
+            print(tr("save_failed", url=canonical, error=error))
         finally:
             if response is not None:
                 response.close()
-        self.cache[url] = result
+        self.cache[canonical] = None if result == url else result
         return result
 
 
@@ -1013,7 +1055,7 @@ def main() -> None:
         title = match.group(4) or ""
         if not is_remote(url):
             return match.group(0)
-        found_urls.add(url)
+        found_urls.add(canonical_url(url))
         local = downloader.localize(url)
         if local == url:
             return match.group(0)
@@ -1023,7 +1065,7 @@ def main() -> None:
         url = match.group(3)
         if not is_remote(url):
             return match.group(0)
-        found_urls.add(url)
+        found_urls.add(canonical_url(url))
         local = downloader.localize(url)
         if local == url:
             return match.group(0)
@@ -1044,7 +1086,7 @@ def main() -> None:
         url = ref_urls.get(key)
         if not is_remote(url):
             return match.group(0)
-        found_urls.add(url)
+        found_urls.add(canonical_url(url))
         local = downloader.localize(url)
         if local == url:
             return match.group(0)

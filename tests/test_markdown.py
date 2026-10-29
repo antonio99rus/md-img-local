@@ -39,6 +39,25 @@ def test_inline_html_and_dedupe(script, run_main, tmp_path, fake_session):
     assert fake_session.closed is True
 
 
+def test_fragment_urls_are_deduplicated(
+    script, run_main, tmp_path, fake_session, capsys
+):
+    base = "http://example.com/img.png"
+    path = write_md(
+        tmp_path,
+        f"![a]({base}#one)\n![b]({base}#two)\n",
+    )
+    expected = local_name(script)
+
+    run_main(path)
+
+    text = path.read_text(encoding="utf-8")
+    assert text == f"![a]({expected})\n![b]({expected})\n"
+    assert len(fake_session.calls) == 1
+    assert fake_session.calls[0][0] == base
+    assert "Unique images found: 1" in capsys.readouterr().out
+
+
 def test_reference_style_is_inlined(script, run_main, tmp_path, fake_session):
     path = write_md(
         tmp_path,
