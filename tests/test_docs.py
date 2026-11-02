@@ -8,8 +8,6 @@ from toml_compat import tomllib
 ROOT = Path(__file__).resolve().parents[1]
 README_RU = ROOT / "README.md"
 README_EN = ROOT / "README-EN-US.md"
-# Флаги, без которых документация заведомо неполна.
-CORE_FLAGS = frozenset({"--media", "--no-backup", "--proxy", "--lang"})
 CODE_SPAN_RE = re.compile(r"`([^`\n]+)`")
 LONG_FLAG_RE = re.compile(r"--[a-z][a-z0-9-]*")
 
@@ -37,6 +35,16 @@ def parser_flags(script) -> set[str]:
     }
 
 
+def runtime_dependencies() -> set[str]:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    names = set()
+    for requirement in project["project"]["dependencies"]:
+        match = re.match(r"[A-Za-z0-9_.-]+", requirement)
+        assert match is not None, requirement
+        names.add(match.group(0).lower())
+    return names
+
+
 def test_readmes_exist_and_cross_link():
     assert README_RU.is_file()
     assert README_EN.is_file()
@@ -44,20 +52,31 @@ def test_readmes_exist_and_cross_link():
     assert "README.md" in read(README_EN)
 
 
-def test_readmes_document_same_flags():
-    russian = documented_flags(read(README_RU))
-    english = documented_flags(read(README_EN))
-
-    assert CORE_FLAGS <= russian
-    assert russian == english
-
-
-def test_readmes_document_only_existing_options(script):
+def test_readmes_document_every_cli_option(script):
     options = parser_flags(script)
 
     for path in (README_RU, README_EN):
-        unknown = documented_flags(read(path)) - options
-        assert not unknown, f"{path.name} documents unknown flags: {unknown}"
+        documented = documented_flags(read(path))
+        missing = options - documented
+        unknown = documented - options
+        assert not missing, f"{path.name} does not document: {sorted(missing)}"
+        assert not unknown, f"{path.name} documents unknown flags: {sorted(unknown)}"
+
+
+def test_readmes_list_all_runtime_dependencies():
+    requirements = runtime_dependencies()
+
+    for path in (README_RU, README_EN):
+        text = read(path).lower()
+        for requirement in requirements:
+            assert re.search(
+                rf"\b{re.escape(requirement)}\b", text
+            ), f"{path.name} misses {requirement}"
+
+
+def test_readmes_do_not_mention_removed_certifi():
+    for path in (README_RU, README_EN):
+        assert re.search(r"\bcertifi\b", read(path).lower()) is None
 
 
 def test_readmes_are_in_expected_languages():
