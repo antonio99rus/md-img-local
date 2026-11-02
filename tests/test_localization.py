@@ -146,6 +146,10 @@ def test_all_languages_cover_required_messages(script):
         "positional_title",
         "options_title",
         "error_prefix",
+        "arg_required",
+        "arg_unrecognized",
+        "arg_invalid_choice",
+        "arg_expected_one",
         "file_not_found",
         "read_error",
         "media_not_directory",
@@ -212,14 +216,101 @@ def test_set_language_rejects_unknown(script):
         (["--lang", "ru"], "ru"),
         (["--lang=ru", "note.md"], "ru"),
         (["note.md", "--lang=en"], "en"),
+        (["--lan", "ru"], "ru"),
+        (["--la=ru", "note.md"], "ru"),
+        (["--l", "ru"], "ru"),
+        (["--lang", "en", "--lan", "ru"], "ru"),
         (["note.md"], None),
         (["--lang"], None),
+        (["--lang", "--media", "assets"], None),
+        (["--lang="], ""),
         (["--", "--lang", "ru"], None),
+        (["--language", "ru"], None),
         (["-h"], None),
     ],
 )
 def test_language_from_argv(script, argv, expected):
     assert script.language_from_argv(argv) == expected
+
+
+def test_current_language_follows_set_language(script):
+    script.set_language("ru")
+
+    assert script.current_language() == "ru"
+
+
+def test_language_is_isolated_between_threads(script):
+    from concurrent.futures import ThreadPoolExecutor
+
+    def render(code: str) -> str:
+        script.set_language(code)
+        return script.tr("downloaded", count=1)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        russian, english = pool.map(render, ["ru", "en"])
+
+    assert "Скачано" in russian
+    assert "Downloaded" in english
+    assert script.current_language() == "en"
+
+
+def test_argparse_invalid_choice_is_localized(
+    script, run_main, tmp_path, fake_session, capsys, monkeypatch
+):
+    monkeypatch.setenv("MD_IMG_LOCAL_LANG", "ru")
+    path = tmp_path / "note.md"
+    path.write_text(f"![a]({URL})\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as error:
+        run_main(path, "--lang=de")
+
+    stderr = capsys.readouterr().err
+    assert error.value.code == 2
+    assert "недопустимое значение 'de'" in stderr
+    assert "invalid choice" not in stderr
+
+
+def test_argparse_missing_argument_is_localized(
+    script, run_main, capsys, monkeypatch
+):
+    monkeypatch.setenv("MD_IMG_LOCAL_LANG", "ru")
+
+    with pytest.raises(SystemExit) as error:
+        run_main()
+
+    stderr = capsys.readouterr().err
+    assert error.value.code == 2
+    assert "требуются следующие аргументы: markdown" in stderr
+
+
+def test_argparse_unrecognized_argument_is_localized(
+    script, run_main, tmp_path, fake_session, capsys, monkeypatch
+):
+    monkeypatch.setenv("MD_IMG_LOCAL_LANG", "ru")
+    path = tmp_path / "note.md"
+    path.write_text(f"![a]({URL})\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as error:
+        run_main(path, "--bogus")
+
+    stderr = capsys.readouterr().err
+    assert error.value.code == 2
+    assert "нераспознанные аргументы: --bogus" in stderr
+
+
+def test_argparse_missing_option_value_is_localized(
+    script, run_main, tmp_path, fake_session, capsys, monkeypatch
+):
+    monkeypatch.setenv("MD_IMG_LOCAL_LANG", "ru")
+    path = tmp_path / "note.md"
+    path.write_text(f"![a]({URL})\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as error:
+        run_main(path, "--media")
+
+    stderr = capsys.readouterr().err
+    assert error.value.code == 2
+    assert "аргумент --media: требуется одно значение" in stderr
 
 
 def test_report_in_english(script, run_main, tmp_path, fake_session, capsys):

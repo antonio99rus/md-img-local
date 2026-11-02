@@ -14,6 +14,7 @@ import ssl
 import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
+from contextvars import ContextVar
 from pathlib import Path
 from urllib.parse import quote, urljoin, urlparse, urlsplit, urlunsplit, unquote
 
@@ -147,6 +148,13 @@ MESSAGES: dict[str, dict[str, str]] = {
         "positional_title": "positional arguments",
         "options_title": "options",
         "error_prefix": "error",
+        "arg_required": "the following arguments are required: {names}",
+        "arg_unrecognized": "unrecognized arguments: {names}",
+        "arg_invalid_choice": (
+            "argument {argument}: invalid choice: {value} "
+            "(choose from {choices})"
+        ),
+        "arg_expected_one": "argument {argument}: expected one argument",
         "file_not_found": "file not found: {path}",
         "read_error": "cannot read {path}: {error}",
         "media_not_directory": "media path is not a directory: {path}",
@@ -254,6 +262,13 @@ MESSAGES: dict[str, dict[str, str]] = {
         "positional_title": "позиционные аргументы",
         "options_title": "параметры",
         "error_prefix": "ошибка",
+        "arg_required": "требуются следующие аргументы: {names}",
+        "arg_unrecognized": "нераспознанные аргументы: {names}",
+        "arg_invalid_choice": (
+            "аргумент {argument}: недопустимое значение {value} "
+            "(допустимо: {choices})"
+        ),
+        "arg_expected_one": "аргумент {argument}: требуется одно значение",
         "file_not_found": "файл не найден: {path}",
         "read_error": "не удалось прочитать {path}: {error}",
         "media_not_directory": "путь media не является каталогом: {path}",
@@ -328,7 +343,9 @@ MESSAGES: dict[str, dict[str, str]] = {
     },
 }
 
-_language = DEFAULT_LANGUAGE
+_language: ContextVar[str] = ContextVar(
+    "md_img_local_language", default=DEFAULT_LANGUAGE
+)
 
 
 def normalize_language(value: str | None) -> str | None:
@@ -400,15 +417,18 @@ def detect_language(
 
 
 def set_language(code: str) -> None:
-    global _language
     if code not in LANGUAGES:
         raise ValueError(f"unsupported language: {code}")
-    _language = code
+    _language.set(code)
+
+
+def current_language() -> str:
+    return _language.get()
 
 
 def tr(key: str, **kwargs: object) -> str:
     """Возвращает сообщение на текущем языке с откатом на английский."""
-    template = MESSAGES.get(_language, {}).get(key) or MESSAGES[
+    template = MESSAGES.get(current_language(), {}).get(key) or MESSAGES[
         DEFAULT_LANGUAGE
     ].get(key)
     if template is None:
@@ -416,21 +436,85 @@ def tr(key: str, **kwargs: object) -> str:
     return template.format(**kwargs)
 
 
+LONG_OPTIONS = (
+    "--help",
+    "--media",
+    "--no-backup",
+    "--force",
+    "--write-mode",
+    "--allow-private",
+    "--proxy",
+    "--lang",
+    "--version",
+)
+
+
+def _is_lang_option(argument: str) -> bool:
+    """Проверяет --lang с учётом однозначных сокращений, как у argparse."""
+    if not argument.startswith("--") or argument == "--":
+        return False
+    name = argument.split("=", 1)[0]
+    matches = [option for option in LONG_OPTIONS if option.startswith(name)]
+    return matches == ["--lang"]
+
+
 def language_from_argv(argv: Sequence[str]) -> str | None:
     """Достаёт --lang до полного разбора, чтобы локализовать саму справку."""
-    for index, argument in enumerate(argv):
+    value: str | None = None
+    index = 0
+    while index < len(argv):
+        argument = argv[index]
         if argument == "--":
-            return None
-        if argument == "--lang" and index + 1 < len(argv):
-            return argv[index + 1]
-        if argument.startswith("--lang="):
-            return argument.split("=", 1)[1]
-    return None
+            break
+        if not _is_lang_option(argument):
+            index += 1
+            continue
+        _, separator, inline = argument.partition("=")
+        if separator:
+            value = inline
+            index += 1
+            continue
+        if index + 1 >= len(argv):
+            break
+        candidate = argv[index + 1]
+        if candidate.startswith("-") and candidate != "-":
+            # Значение съедено другим флагом: argparse сообщит об ошибке.
+            index += 1
+            continue
+        value = candidate
+        index += 2
+    return value
+
+
+def localize_argparse_message(message: str) -> str:
+    """Переводит типовые ошибки argparse; остальное оставляет как есть."""
+    match = re.fullmatch(r"the following arguments are required: (.+)", message)
+    if match:
+        return tr("arg_required", names=match.group(1))
+    match = re.fullmatch(r"unrecognized arguments: (.+)", message)
+    if match:
+        return tr("arg_unrecognized", names=match.group(1))
+    match = re.fullmatch(
+        r"argument (.+?): invalid choice: (.+?) \(choose from (.+)\)", message
+    )
+    if match:
+        return tr(
+            "arg_invalid_choice",
+            argument=match.group(1),
+            value=match.group(2),
+            choices=match.group(3),
+        )
+    match = re.fullmatch(r"argument (.+?): expected one argument", message)
+    if match:
+        return tr("arg_expected_one", argument=match.group(1))
+    return message
 
 
 class LocalizedHelpFormatter(argparse.HelpFormatter):
     def add_usage(self, usage, actions, groups, prefix=None):
-        return super().add_usage(usage, actions, groups, prefix=tr("usage_prefix"))
+        if prefix is None:
+            prefix = tr("usage_prefix")
+        return super().add_usage(usage, actions, groups, prefix=prefix)
 
     def start_section(self, heading):
         titles = {
@@ -443,7 +527,10 @@ class LocalizedHelpFormatter(argparse.HelpFormatter):
 class LocalizedArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         self.print_usage(sys.stderr)
-        self.exit(2, f"{self.prog}: {tr('error_prefix')}: {message}\n")
+        translated = localize_argparse_message(message)
+        self.exit(
+            2, f"{self.prog}: {tr('error_prefix')}: {translated}\n"
+        )
 
 
 class ProxyConfigError(ValueError):
@@ -1238,9 +1325,6 @@ def main() -> int:
         help=tr("help_version"),
     )
     args = parser.parse_args()
-
-    if args.lang:
-        set_language(args.lang)
 
     try:
         return run(args, parser)
