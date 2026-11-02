@@ -15,6 +15,7 @@ import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, urljoin, urlparse, urlsplit, urlunsplit, unquote
 
@@ -1248,158 +1249,30 @@ class Downloader:
         return result
 
 
-def configure_tls() -> None:
-    """Подключает системное хранилище сертификатов вместо бандла certifi."""
-    if ssl.SSLContext is truststore.SSLContext:
-        return
-    truststore.inject_into_ssl()
+@dataclass(frozen=True)
+class RewriteResult:
+    """Результат переписывания Markdown без записи на диск."""
+
+    text: str
+    found_urls: frozenset[str]
 
 
-def configure_output() -> None:
-    """Делает вывод читаемым при перенаправлении на любой консоли."""
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is None:
-            continue
-        try:
-            reconfigure(encoding="utf-8", errors="replace")
-        except (ValueError, OSError):
-            continue
+@dataclass(frozen=True)
+class RunReport:
+    """Итоги запуска для отчёта и кода возврата."""
+
+    path: Path
+    found: int
+    downloaded: int
+    failed: int
+
+    @property
+    def exit_code(self) -> int:
+        return 1 if self.failed else 0
 
 
-def main() -> int:
-    configure_tls()
-    configure_output()
-    set_language(detect_language(language_from_argv(sys.argv[1:])))
-
-    parser = LocalizedArgumentParser(
-        description=tr("description"),
-        formatter_class=LocalizedHelpFormatter,
-        add_help=False,
-    )
-    parser.add_argument("-h", "--help", action="help", help=tr("help_flag"))
-    parser.add_argument("markdown", type=Path, help=tr("help_markdown"))
-    parser.add_argument(
-        "--media",
-        type=Path,
-        default=None,
-        help=tr("help_media"),
-    )
-    parser.add_argument(
-        "--no-backup",
-        action="store_true",
-        help=tr("help_no_backup"),
-    )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help=tr("help_force"),
-    )
-    parser.add_argument(
-        "--write-mode",
-        choices=("in-place", "atomic"),
-        default="in-place",
-        help=tr("help_write_mode"),
-    )
-    parser.add_argument(
-        "--allow-private",
-        action="store_true",
-        help=tr("help_allow_private"),
-    )
-    parser.add_argument(
-        "--proxy",
-        default=None,
-        metavar="URL",
-        help=tr("help_proxy"),
-    )
-    parser.add_argument(
-        "--lang",
-        choices=LANGUAGES,
-        default=None,
-        help=tr("help_lang"),
-    )
-    parser.add_argument(
-        "--version",
-        action="version",
-        version=f"%(prog)s {VERSION}",
-        help=tr("help_version"),
-    )
-    args = parser.parse_args()
-
-    try:
-        return run(args, parser)
-    except (OSError, ValueError) as error:
-        parser.error(tr("unexpected_error", error=error))
-    return 2
-
-
-def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
-    if args.no_backup and not args.force and args.write_mode == "in-place":
-        parser.error(tr("no_backup_requires_force"))
-
-    try:
-        proxy = parse_proxy(args.proxy)
-        if proxy:
-            ensure_socks_support(proxy)
-    except ProxyConfigError as error:
-        parser.error(str(error))
-
-    proxy_label = mask_proxy(proxy) if proxy else None
-
-    source_path = args.markdown.expanduser().resolve()
-    if not source_path.is_file():
-        parser.error(tr("file_not_found", path=source_path))
-
-    media_dir = (
-        args.media.expanduser().resolve()
-        if args.media
-        else source_path.parent / "media"
-    )
-    if media_dir.exists() and not media_dir.is_dir():
-        parser.error(tr("media_not_directory", path=media_dir))
-
-    if proxy_label:
-        print(tr("proxy_banner", proxy=proxy_label))
-
-    session = build_session(proxy)
-    try:
-        downloader = Downloader(
-            media_dir,
-            source_path.parent,
-            session,
-            proxy_label,
-            allow_private=args.allow_private,
-        )
-        try:
-            data = source_path.read_bytes()
-        except OSError as error:
-            parser.error(tr("read_error", path=source_path, error=error))
-        try:
-            text, encoding, bom = decode_markdown(data)
-        except UnicodeDecodeError as error:
-            parser.error(tr("encoding_error", path=source_path, error=error))
-        return process(
-            args,
-            parser,
-            source_path,
-            downloader,
-            text,
-            encoding,
-            bom,
-        )
-    finally:
-        session.close()
-
-
-def process(
-    args: argparse.Namespace,
-    parser: argparse.ArgumentParser,
-    source_path: Path,
-    downloader: Downloader,
-    text: str,
-    encoding: str,
-    bom: bytes,
-) -> int:
+def rewrite(text: str, downloader: Downloader) -> RewriteResult:
+    """Заменяет удалённые ссылки на локальные, не трогая код и комментарии."""
     protected_text, protected_regions = protect_markdown_regions(text)
 
     found_urls: set[str] = set()
@@ -1467,6 +1340,170 @@ def process(
 
     new_text = REF_DEF_RE.sub(drop_used_definitions, new_text)
     new_text = restore_markdown_regions(new_text, protected_regions)
+    return RewriteResult(new_text, frozenset(found_urls))
+
+
+def configure_tls() -> None:
+    """Подключает системное хранилище сертификатов вместо бандла certifi."""
+    if ssl.SSLContext is truststore.SSLContext:
+        return
+    truststore.inject_into_ssl()
+
+
+def configure_output() -> None:
+    """Делает вывод читаемым при перенаправлении на любой консоли."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            continue
+
+
+def build_parser() -> LocalizedArgumentParser:
+    parser = LocalizedArgumentParser(
+        description=tr("description"),
+        formatter_class=LocalizedHelpFormatter,
+        add_help=False,
+    )
+    parser.add_argument("-h", "--help", action="help", help=tr("help_flag"))
+    parser.add_argument("markdown", type=Path, help=tr("help_markdown"))
+    parser.add_argument(
+        "--media",
+        type=Path,
+        default=None,
+        help=tr("help_media"),
+    )
+    parser.add_argument(
+        "--no-backup",
+        action="store_true",
+        help=tr("help_no_backup"),
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help=tr("help_force"),
+    )
+    parser.add_argument(
+        "--write-mode",
+        choices=("in-place", "atomic"),
+        default="in-place",
+        help=tr("help_write_mode"),
+    )
+    parser.add_argument(
+        "--allow-private",
+        action="store_true",
+        help=tr("help_allow_private"),
+    )
+    parser.add_argument(
+        "--proxy",
+        default=None,
+        metavar="URL",
+        help=tr("help_proxy"),
+    )
+    parser.add_argument(
+        "--lang",
+        choices=LANGUAGES,
+        default=None,
+        help=tr("help_lang"),
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {VERSION}",
+        help=tr("help_version"),
+    )
+    return parser
+
+
+def main() -> int:
+    configure_tls()
+    configure_output()
+    set_language(detect_language(language_from_argv(sys.argv[1:])))
+
+    parser = build_parser()
+    args = parser.parse_args()
+
+    try:
+        return run(args, parser)
+    except (OSError, ValueError) as error:
+        parser.error(tr("unexpected_error", error=error))
+    return 2
+
+
+def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    if args.no_backup and not args.force and args.write_mode == "in-place":
+        parser.error(tr("no_backup_requires_force"))
+
+    try:
+        proxy = parse_proxy(args.proxy)
+        if proxy:
+            ensure_socks_support(proxy)
+    except ProxyConfigError as error:
+        parser.error(str(error))
+
+    proxy_label = mask_proxy(proxy) if proxy else None
+
+    source_path = args.markdown.expanduser().resolve()
+    if not source_path.is_file():
+        parser.error(tr("file_not_found", path=source_path))
+
+    media_dir = (
+        args.media.expanduser().resolve()
+        if args.media
+        else source_path.parent / "media"
+    )
+    if media_dir.exists() and not media_dir.is_dir():
+        parser.error(tr("media_not_directory", path=media_dir))
+
+    if proxy_label:
+        print(tr("proxy_banner", proxy=proxy_label))
+
+    session = build_session(proxy)
+    try:
+        downloader = Downloader(
+            media_dir,
+            source_path.parent,
+            session,
+            proxy_label,
+            allow_private=args.allow_private,
+        )
+        try:
+            data = source_path.read_bytes()
+        except OSError as error:
+            parser.error(tr("read_error", path=source_path, error=error))
+        try:
+            text, encoding, bom = decode_markdown(data)
+        except UnicodeDecodeError as error:
+            parser.error(tr("encoding_error", path=source_path, error=error))
+        try:
+            report = process(
+                args,
+                source_path,
+                downloader,
+                text,
+                encoding,
+                bom,
+            )
+        except WriteError as error:
+            parser.error(str(error))
+        report_result(report)
+        return report.exit_code
+    finally:
+        session.close()
+
+
+def process(
+    args: argparse.Namespace,
+    source_path: Path,
+    downloader: Downloader,
+    text: str,
+    encoding: str,
+    bom: bytes,
+) -> RunReport:
+    result = rewrite(text, downloader)
 
     backup_path: Path | None = None
     if not args.no_backup:
@@ -1480,23 +1517,26 @@ def process(
                 )
             )
         print(tr("backup", source=source_path.name, backup=backup_path.name))
-    try:
-        write_markdown(
-            source_path,
-            encode_markdown(new_text, encoding, bom),
-            args.write_mode,
-            force=args.force,
-            backup_path=backup_path,
-        )
-    except WriteError as error:
-        parser.error(str(error))
+    write_markdown(
+        source_path,
+        encode_markdown(result.text, encoding, bom),
+        args.write_mode,
+        force=args.force,
+        backup_path=backup_path,
+    )
+    return RunReport(
+        path=source_path,
+        found=len(result.found_urls),
+        downloaded=downloader.downloaded,
+        failed=downloader.failed,
+    )
 
-    print(tr("result", path=source_path))
-    print(tr("found", count=len(found_urls)))
-    print(tr("downloaded", count=downloader.downloaded))
-    print(tr("failed", count=downloader.failed))
 
-    return 1 if downloader.failed else 0
+def report_result(result: RunReport) -> None:
+    print(tr("result", path=result.path))
+    print(tr("found", count=result.found))
+    print(tr("downloaded", count=result.downloaded))
+    print(tr("failed", count=result.failed))
 
 
 if __name__ == "__main__":
