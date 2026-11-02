@@ -323,6 +323,26 @@ def test_proxy_is_passed_to_session_and_masked(script, run_main, tmp_path, fake_
     assert "secret" not in output
 
 
+def test_default_user_agent_is_passed(
+    script, run_main, tmp_path, fake_session
+):
+    path = write_md(tmp_path, f"![a]({URL})\n")
+
+    run_main(path)
+
+    assert fake_session.user_agents == [script.USER_AGENT]
+
+
+def test_custom_user_agent_is_passed(
+    script, run_main, tmp_path, fake_session
+):
+    path = write_md(tmp_path, f"![a]({URL})\n")
+
+    run_main(path, "--user-agent=TestAgent/2.0")
+
+    assert fake_session.user_agents == ["TestAgent/2.0"]
+
+
 def test_blank_proxy_means_no_proxy(script, run_main, tmp_path, fake_session, capsys):
     path = write_md(tmp_path, f"![a]({URL})\n")
 

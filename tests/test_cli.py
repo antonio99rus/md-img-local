@@ -38,6 +38,7 @@ def test_help_mentions_proxy_and_lang():
     assert result.returncode == 0
     assert "--proxy" in result.stdout
     assert "--lang" in result.stdout
+    assert "--user-agent" in result.stdout
     assert "socks5://127.0.0.1:3066" in result.stdout
     assert "usage:" in result.stdout
     assert "options:" in result.stdout

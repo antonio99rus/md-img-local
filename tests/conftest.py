@@ -63,11 +63,16 @@ def default_language(script: ModuleType, monkeypatch: pytest.MonkeyPatch):
 
 @pytest.fixture
 def fake_session(script: ModuleType, monkeypatch: pytest.MonkeyPatch) -> FakeSession:
-    """Подменяет сессию; запоминает, какой прокси передан в build_session()."""
+    """Подменяет сессию; запоминает прокси и User-Agent из build_session()."""
     fake = FakeSession({URL: FakeResponse()})
+    fake.proxies = []
+    fake.user_agents = []
 
-    def build_session(proxy: str | None) -> FakeSession:
+    def build_session(
+        proxy: str | None, user_agent: str | None = None
+    ) -> FakeSession:
         fake.proxies.append(proxy)
+        fake.user_agents.append(user_agent)
         return fake
 
     monkeypatch.setattr(script, "build_session", build_session)

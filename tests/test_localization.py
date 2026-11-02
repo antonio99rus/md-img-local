@@ -139,6 +139,7 @@ def test_all_languages_cover_required_messages(script):
         "help_write_mode",
         "help_allow_private",
         "help_proxy",
+        "help_user_agent",
         "help_lang",
         "help_version",
         "help_flag",

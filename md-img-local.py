@@ -22,6 +22,8 @@ from urllib.parse import quote, urljoin, urlparse, urlsplit, urlunsplit, unquote
 import requests
 
 import truststore
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 INLINE_IMAGE_RE = re.compile(
     r'!\[([^\]]*)\]\(\s*(?:<([^>]+)>|(\S+?))'
@@ -57,6 +59,9 @@ MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 DOWNLOAD_CHUNK_SIZE = 64 * 1024
 MAX_REDIRECTS = 5
 REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+REQUEST_TIMEOUT = (10, 30)
+MAX_RETRIES = 2
+RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 # SVG намеренно отсутствует: это активный контент, опасный при публикации media.
 IMAGE_CONTENT_TYPES = {
@@ -103,7 +108,7 @@ SENSITIVE_QUERY_MARKERS = (
 LOG_URL_LIMIT = 200
 
 # UA = "markdown-image-downloader/1.0"
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+USER_AGENT = f"md-img-local/{VERSION}"
 
 PROXY_SCHEMES = ("http", "https", "socks4", "socks4a", "socks5", "socks5h")
 
@@ -141,6 +146,10 @@ MESSAGES: dict[str, dict[str, str]] = {
             "Proxy to download through: http, https, socks4, socks4a, socks5, "
             "socks5h (port required), e.g. socks5://127.0.0.1:3066. "
             "When set, HTTP_PROXY, HTTPS_PROXY and NO_PROXY are ignored"
+        ),
+        "help_user_agent": (
+            "User-Agent header for downloads "
+            "(default: program name and version)"
         ),
         "help_lang": "Language of messages and help: en or ru (default: system locale)",
         "help_version": "show program's version number and exit",
@@ -253,6 +262,10 @@ MESSAGES: dict[str, dict[str, str]] = {
             "Прокси для скачивания: http, https, socks4, socks4a, socks5, socks5h "
             "(порт обязателен), например socks5://127.0.0.1:3066. "
             "При указании прокси переменные HTTP_PROXY, HTTPS_PROXY и NO_PROXY игнорируются"
+        ),
+        "help_user_agent": (
+            "Заголовок User-Agent для скачивания "
+            "(по умолчанию — имя и версия программы)"
         ),
         "help_lang": (
             "Язык сообщений и справки: en или ru (по умолчанию — локаль системы)"
@@ -447,6 +460,7 @@ LONG_OPTIONS = (
     "--proxy",
     "--lang",
     "--version",
+    "--user-agent",
 )
 
 
@@ -599,10 +613,26 @@ def ensure_socks_support(proxy: str) -> None:
         raise ProxyConfigError(tr("socks_missing")) from error
 
 
-def build_session(proxy: str | None) -> requests.Session:
+def build_session(
+    proxy: str | None, user_agent: str = USER_AGENT
+) -> requests.Session:
     session = requests.Session()
-    session.headers["User-Agent"] = UA
+    session.headers["User-Agent"] = sanitize_text(user_agent) or USER_AGENT
+    session.verify = True
     session.max_redirects = MAX_REDIRECTS
+    retry = Retry(
+        total=MAX_RETRIES,
+        connect=MAX_RETRIES,
+        read=MAX_RETRIES,
+        status=MAX_RETRIES,
+        backoff_factor=0.5,
+        status_forcelist=RETRY_STATUSES,
+        allowed_methods=frozenset({"GET"}),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
     if proxy:
         # Явно указанный прокси должен главенствовать над HTTP_PROXY/HTTPS_PROXY/NO_PROXY.
         session.trust_env = False
@@ -1169,8 +1199,7 @@ class Downloader:
             response = self.session.get(
                 current,
                 stream=True,
-                verify=True,
-                timeout=30,
+                timeout=REQUEST_TIMEOUT,
                 allow_redirects=False,
             )
             if response.status_code not in REDIRECT_STATUSES:
@@ -1404,6 +1433,12 @@ def build_parser() -> LocalizedArgumentParser:
         help=tr("help_proxy"),
     )
     parser.add_argument(
+        "--user-agent",
+        default=USER_AGENT,
+        metavar="STRING",
+        help=tr("help_user_agent"),
+    )
+    parser.add_argument(
         "--lang",
         choices=LANGUAGES,
         default=None,
@@ -1461,7 +1496,7 @@ def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     if proxy_label:
         print(tr("proxy_banner", proxy=proxy_label))
 
-    session = build_session(proxy)
+    session = build_session(proxy, args.user_agent)
     try:
         downloader = Downloader(
             media_dir,

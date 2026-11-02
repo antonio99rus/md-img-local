@@ -100,7 +100,46 @@ def test_build_session_without_proxy(script):
     try:
         assert session.proxies == {}
         assert session.trust_env is True
-        assert "Mozilla" in session.headers["User-Agent"]
+        assert session.verify is True
+        assert session.headers["User-Agent"] == script.USER_AGENT
+    finally:
+        session.close()
+
+
+def test_build_session_retries_get_requests(script):
+    session = script.build_session(None)
+    try:
+        for scheme in ("http://", "https://"):
+            adapter = session.get_adapter(f"{scheme}example.com")
+            retry = adapter.max_retries
+            assert retry.total == script.MAX_RETRIES
+            assert retry.allowed_methods == frozenset({"GET"})
+            assert set(retry.status_forcelist) == set(script.RETRY_STATUSES)
+    finally:
+        session.close()
+
+
+def test_build_session_custom_user_agent(script):
+    session = script.build_session(None, "TestAgent/1.0")
+    try:
+        assert session.headers["User-Agent"] == "TestAgent/1.0"
+    finally:
+        session.close()
+
+
+def test_build_session_sanitizes_user_agent(script):
+    session = script.build_session(None, "Bad\nAgent\x1b")
+    try:
+        assert "\n" not in session.headers["User-Agent"]
+        assert "\x1b" not in session.headers["User-Agent"]
+    finally:
+        session.close()
+
+
+def test_build_session_falls_back_for_empty_user_agent(script):
+    session = script.build_session(None, "")
+    try:
+        assert session.headers["User-Agent"] == script.USER_AGENT
     finally:
         session.close()
 

@@ -34,8 +34,8 @@ def test_localize_passes_expected_request_options(script, tmp_path):
     make_downloader(script, tmp_path, session).localize(url)
 
     _, kwargs = session.calls[0]
-    assert kwargs["verify"] is True
-    assert kwargs["timeout"] == 30
+    assert "verify" not in kwargs
+    assert kwargs["timeout"] == script.REQUEST_TIMEOUT
     assert kwargs["stream"] is True
     assert kwargs["allow_redirects"] is False
 
