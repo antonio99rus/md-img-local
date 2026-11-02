@@ -15,7 +15,12 @@ dependencies = [
 package = false
 
 [dependency-groups]
-dev = ["pytest>=8.0", "pytest-cov>=5.0"]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    # tomllib появился только в Python 3.11, а проект поддерживает 3.10.
+    "tomli>=2.0; python_version < '3.11'",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

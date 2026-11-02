@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from helpers import PNG_BYTES
-from socks5_proxy import Socks5Proxy, free_port
+from socks5_proxy import Socks5Proxy, reserved_port
 
 
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
@@ -81,10 +81,13 @@ def test_download_through_socks_proxy(
 def test_unreachable_proxy_keeps_link(
     script, run_main, tmp_path, image_server, capsys
 ):
+    pytest.importorskip("socks")
     path = write_md(tmp_path, image_server)
-    proxy = f"socks5://127.0.0.1:{free_port()}"
 
-    run_main(path, f"--proxy={proxy}", "--allow-private")
+    # Порт остаётся занятым (bind без listen), поэтому отказ детерминирован.
+    with reserved_port() as port:
+        proxy = f"socks5://127.0.0.1:{port}"
+        run_main(path, f"--proxy={proxy}", "--allow-private")
 
     output = capsys.readouterr()
     assert path.read_text(encoding="utf-8") == f"# Заметка\n\n![img]({image_server})\n"
@@ -92,3 +95,47 @@ def test_unreachable_proxy_keeps_link(
     assert "Errors: 1" in output.out
     assert proxy in output.err
     assert "unreachable?" in output.err
+
+
+def test_session_uses_environment_proxy_without_flag(script, monkeypatch):
+    proxy = "http://127.0.0.1:3128"
+    monkeypatch.setenv("HTTP_PROXY", proxy)
+    monkeypatch.setenv("HTTPS_PROXY", proxy)
+    monkeypatch.setenv("NO_PROXY", "example.invalid")
+    monkeypatch.setenv("no_proxy", "example.invalid")
+    session = script.build_session(None)
+    try:
+        settings = session.merge_environment_settings(
+            "http://example.com/img.png", {}, False, None, None
+        )
+    finally:
+        session.close()
+
+    assert settings["proxies"]["http"] == proxy
+    assert settings["proxies"]["https"] == proxy
+
+
+def test_explicit_proxy_overrides_environment(
+    script,
+    run_main,
+    tmp_path,
+    image_server,
+    socks_proxy,
+    monkeypatch,
+    capsys,
+):
+    # Эти значения заведомо нерабочие: запрос должен идти через явный --proxy.
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("NO_PROXY", "example.invalid")
+    monkeypatch.setenv("no_proxy", "example.invalid")
+    path = write_md(tmp_path, image_server)
+
+    run_main(path, f"--proxy={socks_proxy.url}", "--allow-private")
+
+    output = capsys.readouterr().out
+    name = script.filename_for_url(image_server, ".png")
+    assert socks_proxy.connections >= 1
+    assert (tmp_path / "media" / name).read_bytes() == PNG_BYTES
+    assert f"![img](media/{name})" in path.read_text(encoding="utf-8")
+    assert "Downloaded: 1" in output

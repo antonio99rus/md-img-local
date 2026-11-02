@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import contextlib
+import select
 import socket
 import struct
 import threading
+from collections.abc import Iterator
 
 
 class Socks5Proxy:
@@ -16,6 +19,9 @@ class Socks5Proxy:
         self._server.settimeout(0.2)
         self._stop = threading.Event()
         self.connections = 0
+        self._lock = threading.Lock()
+        self._handlers: list[threading.Thread] = []
+        self._sockets: set[socket.socket] = set()
         self._thread = threading.Thread(target=self._serve, daemon=True)
 
     @property
@@ -33,7 +39,30 @@ class Socks5Proxy:
     def stop(self) -> None:
         self._stop.set()
         self._thread.join(timeout=5)
+        with self._lock:
+            sockets = list(self._sockets)
+            handlers = list(self._handlers)
+        # Будим релей, иначе его select() ждёт до 10 секунд и держит teardown.
+        for item in sockets:
+            try:
+                item.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                item.close()
+            except OSError:
+                pass
         self._server.close()
+        for handler in handlers:
+            handler.join(timeout=5)
+
+    def _track(self, connection: socket.socket) -> None:
+        with self._lock:
+            self._sockets.add(connection)
+
+    def _untrack(self, connection: socket.socket) -> None:
+        with self._lock:
+            self._sockets.discard(connection)
 
     def _serve(self) -> None:
         while not self._stop.is_set():
@@ -43,10 +72,13 @@ class Socks5Proxy:
                 continue
             except OSError:
                 break
-            self.connections += 1
-            threading.Thread(
-                target=self._handle, args=(connection,), daemon=True
-            ).start()
+            with self._lock:
+                self.connections += 1
+                handler = threading.Thread(
+                    target=self._handle, args=(connection,), daemon=True
+                )
+                self._handlers.append(handler)
+            handler.start()
 
     @staticmethod
     def _read(connection: socket.socket, size: int) -> bytes:
@@ -60,6 +92,7 @@ class Socks5Proxy:
 
     def _handle(self, connection: socket.socket) -> None:
         upstream = None
+        self._track(connection)
         try:
             _, method_count = self._read(connection, 2)
             self._read(connection, method_count)
@@ -79,22 +112,26 @@ class Socks5Proxy:
                 return
 
             upstream = socket.create_connection((host, port), timeout=10)
+            self._track(upstream)
             connection.sendall(b"\x05\x00\x00\x01" + b"\x00" * 6)
             self._relay(connection, upstream)
         except OSError:
             pass
         finally:
+            self._untrack(connection)
             connection.close()
             if upstream is not None:
+                self._untrack(upstream)
                 upstream.close()
 
     @staticmethod
     def _relay(client: socket.socket, upstream: socket.socket) -> None:
-        import select
-
         sockets = [client, upstream]
         while True:
-            readable, _, _ = select.select(sockets, [], [], 10)
+            try:
+                readable, _, _ = select.select(sockets, [], [], 10)
+            except OSError:
+                return
             if not readable:
                 return
             for source in readable:
@@ -104,8 +141,12 @@ class Socks5Proxy:
                 (upstream if source is client else client).sendall(data)
 
 
-def free_port() -> int:
-    """Свободный TCP-порт на localhost (для теста недоступного прокси)."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+@contextlib.contextmanager
+def reserved_port() -> Iterator[int]:
+    """Держит порт занятым, не слушая его: connect гарантированно получает отказ."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
         sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+        yield sock.getsockname()[1]
+    finally:
+        sock.close()

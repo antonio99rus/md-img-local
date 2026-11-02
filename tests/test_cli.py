@@ -3,8 +3,9 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
+
+from toml_compat import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "md-img-local.py"
