@@ -31,12 +31,21 @@ INLINE_IMAGE_RE = re.compile(
 )
 REF_IMAGE_RE = re.compile(r'!\[([^\]]*)\]\[([^\]]*)\]')
 HTML_IMG_RE = re.compile(
-    r'(<img\b[^>]*?\bsrc\s*=\s*)(["\'])(.*?)\2([^>]*>)',
-    re.IGNORECASE,
+    r"(<img\b[^>]*?\bsrc\s*=\s*)"
+    r"(?:([\"'])(.*?)\2|([^\s\"'>]+))"
+    r"([^>]*>)",
+    re.IGNORECASE | re.DOTALL,
+)
+HTML_SRCSET_RE = re.compile(
+    r"(<(?:img|source)\b[^>]*?\bsrcset\s*=\s*)"
+    r"(?:([\"'])(.*?)\2|([^\s\"'>]+))"
+    r"([^>]*>)",
+    re.IGNORECASE | re.DOTALL,
 )
 REF_DEF_RE = re.compile(
-    r'^[ \t]*\[([^\]]+)\]:[ \t]*(?:<([^>]+)>|([^\s]+))'
-    r'(?:\s+(?:"[^"]*"|\'[^\']*\'|\([^)]*\)))?[ \t]*\r?\n?',
+    r"^[ \t]*\[([^\]]+)\]:[ \t]*(?:<([^>]+)>|([^\s]+))"
+    r"(?:[ \t]+(\"(?:[^\"\\]|\\.)*\"|'[^']*'|\([^)]*\)))?"
+    r"[ \t]*\r?\n?",
     re.MULTILINE,
 )
 
@@ -697,7 +706,12 @@ def extension_for_content_type(content_type: str) -> str:
 
 
 def canonical_url(url: str) -> str:
-    """Убирает fragment и нормализует схему, хост и порт по умолчанию."""
+    """Убирает fragment и нормализует схему, хост и порт по умолчанию.
+
+    Protocol-relative URL (``//host/path``) трактуется как HTTPS.
+    """
+    if url.startswith("//"):
+        url = f"https:{url}"
     try:
         parsed = urlsplit(url)
         port = parsed.port
@@ -1170,7 +1184,9 @@ def restore_markdown_regions(
 
 
 def is_remote(url: str) -> bool:
-    return url is not None and url.lower().startswith(("http://", "https://"))
+    return url is not None and (
+        url.startswith("//") or url.lower().startswith(("http://", "https://"))
+    )
 
 
 class Downloader:
@@ -1319,28 +1335,70 @@ def rewrite(text: str, downloader: Downloader) -> RewriteResult:
         return f"![{alt}]({local}{' ' + title if title else ''})"
 
     def replace_html(match: re.Match[str]) -> str:
-        url = match.group(3)
+        quote = match.group(2)
+        url = match.group(3) if quote else match.group(4)
         if not is_remote(url):
             return match.group(0)
         found_urls.add(canonical_url(url))
         local = downloader.localize(url)
         if local == url:
             return match.group(0)
-        prefix, quote, suffix = match.group(1), match.group(2), match.group(4)
-        return f"{prefix}{quote}{local}{quote}{suffix}"
+        prefix, suffix = match.group(1), match.group(5)
+        if quote:
+            return f"{prefix}{quote}{local}{quote}{suffix}"
+        return f"{prefix}{local}{suffix}"
 
-    ref_urls: dict[str, str] = {}
+    def rewrite_srcset_value(value: str) -> tuple[str, bool]:
+        """Переписывает URL в srcset, сохраняя дескрипторы (1x, 480w и т. п.)."""
+        rewritten: list[str] = []
+        changed = False
+        for candidate in re.split(r",\s*", value):
+            stripped = candidate.strip()
+            if not stripped:
+                continue
+            parts = stripped.split(None, 1)
+            url = parts[0]
+            descriptor = f" {parts[1]}" if len(parts) > 1 else ""
+            if is_remote(url):
+                found_urls.add(canonical_url(url))
+                local = downloader.localize(url)
+                if local != url:
+                    rewritten.append(f"{local}{descriptor}")
+                    changed = True
+                    continue
+            rewritten.append(stripped)
+        if not changed:
+            return value, False
+        return ", ".join(rewritten), True
+
+    def replace_srcset(match: re.Match[str]) -> str:
+        quote = match.group(2)
+        value = match.group(3) if quote else match.group(4)
+        rewritten, changed = rewrite_srcset_value(value)
+        if not changed:
+            return match.group(0)
+        prefix, suffix = match.group(1), match.group(5)
+        if quote:
+            return f"{prefix}{quote}{rewritten}{quote}{suffix}"
+        return f"{prefix}{rewritten}{suffix}"
+
+    ref_defs: dict[str, tuple[str, str]] = {}
     for match in REF_DEF_RE.finditer(protected_text):
         url = match.group(2) or match.group(3)
+        title = match.group(4) or ""
         if url:
-            ref_urls[match.group(1).lower()] = url
+            # CommonMark: при дубликатах побеждает первое определение.
+            ref_defs.setdefault(match.group(1).lower(), (url, title))
 
     replaced_ref_keys: set[str] = set()
 
     def replace_ref_image(match: re.Match[str]) -> str:
         alt = match.group(1)
         key = (match.group(2) or alt).lower()
-        url = ref_urls.get(key)
+        definition = ref_defs.get(key)
+        if definition is None:
+            return match.group(0)
+        url, title = definition
         if not is_remote(url):
             return match.group(0)
         found_urls.add(canonical_url(url))
@@ -1348,10 +1406,11 @@ def rewrite(text: str, downloader: Downloader) -> RewriteResult:
         if local == url:
             return match.group(0)
         replaced_ref_keys.add(key)
-        return f"![{alt}]({local})"
+        return f"![{alt}]({local}{' ' + title if title else ''})"
 
     new_text = INLINE_IMAGE_RE.sub(replace_inline, protected_text)
     new_text = HTML_IMG_RE.sub(replace_html, new_text)
+    new_text = HTML_SRCSET_RE.sub(replace_srcset, new_text)
     new_text = REF_IMAGE_RE.sub(replace_ref_image, new_text)
 
     def drop_used_definitions(match: re.Match[str]) -> str:
@@ -1359,6 +1418,8 @@ def rewrite(text: str, downloader: Downloader) -> RewriteResult:
         if key not in replaced_ref_keys:
             return match.group(0)
         surrounding = new_text[: match.start()] + new_text[match.end():]
+        # Сами определения содержат "[key]:" и не должны считаться использованием.
+        surrounding = REF_DEF_RE.sub("", surrounding)
         if re.search(
             r"\[" + re.escape(match.group(1)) + r"\]",
             surrounding,

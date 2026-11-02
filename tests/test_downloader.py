@@ -189,6 +189,7 @@ def test_extension_for_content_type(script, content_type, expected):
             "http://user:pw@example.com/a.png",
         ),
         ("http://[::1]/a.png#x", "http://[::1]/a.png"),
+        ("//Example.com:443/a.png#frag", "https://example.com/a.png"),
         ("not a url", "not a url"),
     ],
 )

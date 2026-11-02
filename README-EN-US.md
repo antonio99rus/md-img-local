@@ -7,10 +7,10 @@ Downloads images referenced by a Markdown file into `media/` (or a directory of 
 Three link syntaxes are supported:
 
 - inline: `![alt](https://example.com/img.png "title")`, including the angle-bracket form `<url>`;
-- reference-style: `![alt][id]` plus `[id]: https://example.com/img.png`;
-- HTML: `<img src="https://example.com/img.png" ...>`.
+- reference-style: `![alt][id]` plus `[id]: https://example.com/img.png`; if a reference is defined more than once, the first definition wins and its title is preserved;
+- HTML: `<img src="https://example.com/img.png" ...>` with quoted or unquoted `src`, plus `srcset` on `<img>` and `<source>`.
 
-Images inside fenced code blocks, inline code, HTML comments and escaped `\![...]` are left untouched. The same canonical URL is downloaded only once; local links are not modified.
+Protocol-relative URLs (`//cdn.example/img.png`) are treated as HTTPS. Images inside fenced code blocks, inline code, HTML comments and escaped `\![...]` are left untouched. The same canonical URL is downloaded only once; local links are not modified.
 
 ## Requirements
 
@@ -76,9 +76,9 @@ python md-img-local.py note.md --proxy=socks5h://127.0.0.1:3066
 
 1. The Markdown file is read as bytes. UTF-8, UTF-16 and UTF-32 (with a BOM) are supported; the original BOM and line endings are preserved.
 2. Code blocks, inline code, HTML comments and escaped `!` are masked so examples are never rewritten or downloaded.
-3. Image links are collected and canonicalized: the fragment is removed, the scheme and host are lowercased, and default ports are dropped. Query strings are preserved.
+3. Image links are collected and canonicalized: the fragment is removed, the scheme and host are lowercased, and default ports are dropped. Query strings are preserved; protocol-relative URLs are treated as HTTPS.
 4. Every unique image is downloaded into `media/`; the directory is created lazily on the first successful download.
-5. Links are replaced with POSIX-style paths relative to the Markdown file. Spaces and special characters are percent-encoded for Markdown and HTML.
+5. Links are replaced with POSIX-style paths relative to the Markdown file. Spaces and special characters are percent-encoded for Markdown and HTML; `srcset` descriptors such as `1x` and `480w` are preserved.
 6. A backup is created (unless disabled), then the result is written back using the selected write mode.
 7. A report is printed to stdout: unique images found, downloaded, and errors.
 
@@ -142,8 +142,8 @@ The Russian documentation is in [README.md](README.md).
 
 ## Known limitations
 
-- Links are parsed with regular expressions. Protocol-relative URLs (`//cdn.example/img.png`), `srcset`, `<source>`, unquoted `src` and titles in reference definitions are not supported.
-- If a reference is defined more than once, the last definition wins.
+- Links are parsed with regular expressions. `srcset` candidates are split on commas, so a URL containing an unescaped comma is not supported; `<source src>` (as opposed to `<source srcset>`) and `<picture>` markup outside `srcset` are not handled.
+- Every remote candidate in `srcset` is downloaded, including all listed resolutions.
 - Images are downloaded sequentially.
 - A relative `--media` path is resolved from the current working directory, not from the Markdown file.
 
