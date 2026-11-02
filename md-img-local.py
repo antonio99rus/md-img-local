@@ -1546,11 +1546,14 @@ def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     if not source_path.is_file():
         parser.error(tr("file_not_found", path=source_path))
 
-    media_dir = (
-        args.media.expanduser().resolve()
-        if args.media
-        else source_path.parent / "media"
-    )
+    if args.media:
+        media_path = args.media.expanduser()
+        if not media_path.is_absolute():
+            # Относительный путь трактуется от заметки, а не от текущего каталога.
+            media_path = source_path.parent / media_path
+        media_dir = media_path.resolve()
+    else:
+        media_dir = source_path.parent / "media"
     if media_dir.exists() and not media_dir.is_dir():
         parser.error(tr("media_not_directory", path=media_dir))
 

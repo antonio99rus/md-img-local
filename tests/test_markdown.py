@@ -288,6 +288,24 @@ def test_custom_media_dir(script, run_main, tmp_path, fake_session):
     assert f"![a](../assets/{name})" in path.read_text(encoding="utf-8")
 
 
+def test_relative_media_dir_is_resolved_from_markdown_directory(
+    script, run_main, tmp_path, fake_session, monkeypatch
+):
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    path = write_md(notes, f"![a]({URL})\n")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    run_main(path, "--media=assets")
+
+    name = script.filename_for_url(URL, ".png")
+    assert (notes / "assets" / name).is_file()
+    assert not (elsewhere / "assets").exists()
+    assert f"![a](assets/{name})" in path.read_text(encoding="utf-8")
+
+
 def test_missing_markdown_file(script, run_main, tmp_path, fake_session, capsys):
     with pytest.raises(SystemExit) as error:
         run_main(tmp_path / "nope.md")

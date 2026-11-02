@@ -42,7 +42,7 @@ python md-img-local.py <file.md> [options]
 | Argument | Description |
 | --- | --- |
 | `<file.md>` | Source Markdown file (required). |
-| `--media DIR` | Directory for images. Defaults to `media/` next to the Markdown file. A relative path is resolved from the current working directory; `~` is expanded. |
+| `--media DIR` | Directory for images. Defaults to `media/` next to the Markdown file. A relative path is resolved from the directory of the Markdown file; `~` is expanded. |
 | `--no-backup` | Do not create a `file.md.orig` backup. With `in-place` this also requires `--force`; with `atomic` it is allowed on its own. |
 | `--force` | Overwrite an existing `file.md.orig` instead of rotating it, allow `--no-backup` with `in-place`, and discard a leftover write journal. |
 | `--write-mode in-place\|atomic` | How to write the result. `in-place` is the default and preserves the file inode and hardlinks; `atomic` replaces the file through a temporary file. |
@@ -145,7 +145,6 @@ The Russian documentation is in [README.md](README.md).
 - Links are parsed with regular expressions. `srcset` candidates are split on commas, so a URL containing an unescaped comma is not supported; `<source src>` (as opposed to `<source srcset>`) and `<picture>` markup outside `srcset` are not handled.
 - Every remote candidate in `srcset` is downloaded, including all listed resolutions.
 - Images are downloaded sequentially.
-- A relative `--media` path is resolved from the current working directory, not from the Markdown file.
 
 ## Tests
 
