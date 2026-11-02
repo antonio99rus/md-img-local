@@ -50,6 +50,7 @@ python md-img-local.py <file.md> [options]
 | `--proxy URL` | Download through a proxy, e.g. `socks5://127.0.0.1:3066`. An explicit proxy overrides the proxy environment variables. |
 | `--user-agent STRING` | `User-Agent` header for downloads. Defaults to `md-img-local/<version>`. |
 | `--lang en\|ru` | Language of messages and help. Defaults to the system locale. |
+| `--verbose` | Print full URLs in logs instead of masked ones. Proxy passwords are still masked. |
 | `--version` | Print the program version. |
 | `-h, --help` | Show help and exit. |
 
@@ -107,7 +108,7 @@ If a download fails, its link is left as is and processing continues.
 - Exit code `1`: at least one image could not be downloaded or saved.
 - Exit code `2`: configuration, input or local I/O error (missing file, bad proxy, unsupported encoding, write error, and so on).
 
-URLs in logs are masked: credentials and sensitive query parameters are replaced, and control characters are neutralized.
+URLs in logs are masked by default: credentials and sensitive query parameters are replaced, and control characters are neutralized. Pass `--verbose` to print full URLs; control characters are still neutralized, and proxy passwords are always masked.
 
 ## Proxy
 

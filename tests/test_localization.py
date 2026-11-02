@@ -141,6 +141,7 @@ def test_all_languages_cover_required_messages(script):
         "help_proxy",
         "help_user_agent",
         "help_lang",
+        "help_verbose",
         "help_version",
         "help_flag",
         "usage_prefix",

@@ -161,6 +161,10 @@ MESSAGES: dict[str, dict[str, str]] = {
             "(default: program name and version)"
         ),
         "help_lang": "Language of messages and help: en or ru (default: system locale)",
+        "help_verbose": (
+            "Print full URLs in logs; by default credentials and sensitive "
+            "query parameters are masked"
+        ),
         "help_version": "show program's version number and exit",
         "help_flag": "show this help message and exit",
         "usage_prefix": "usage: ",
@@ -278,6 +282,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         ),
         "help_lang": (
             "Язык сообщений и справки: en или ru (по умолчанию — локаль системы)"
+        ),
+        "help_verbose": (
+            "Печатать полные URL в логах; по умолчанию учётные данные и "
+            "чувствительные query-параметры маскируются"
         ),
         "help_version": "показать версию программы и выйти",
         "help_flag": "показать эту справку и выйти",
@@ -468,6 +476,7 @@ LONG_OPTIONS = (
     "--allow-private",
     "--proxy",
     "--lang",
+    "--verbose",
     "--version",
     "--user-agent",
 )
@@ -772,13 +781,16 @@ def mask_url(url: str) -> str:
     return masked
 
 
-def safe_error(error: BaseException, url: str) -> str:
+def safe_error(
+    error: BaseException, url: str, *, verbose: bool = False
+) -> str:
     """Убирает из текста ошибки исходный URL с возможными секретами."""
     text = sanitize_text(str(error))
-    masked = mask_url(url)
     for candidate in (canonical_url(url), url):
-        if candidate:
-            text = text.replace(candidate, masked)
+        if not candidate:
+            continue
+        replacement = sanitize_text(candidate) if verbose else mask_url(candidate)
+        text = text.replace(candidate, replacement)
     return text
 
 
@@ -1197,15 +1209,21 @@ class Downloader:
         session: requests.Session,
         proxy_label: str | None = None,
         allow_private: bool = False,
+        verbose: bool = False,
     ) -> None:
         self.media_dir = media_dir
         self.base_dir = base_dir
         self.session = session
         self.proxy_label = proxy_label
         self.allow_private = allow_private
+        self.verbose = verbose
         self.cache: dict[str, str] = {}
         self.downloaded = 0
         self.failed = 0
+
+    def display_url(self, url: str) -> str:
+        """Полный URL только в режиме --verbose; иначе секреты маскируются."""
+        return sanitize_text(url) if self.verbose else mask_url(url)
 
     def fetch(self, url: str) -> requests.Response:
         """Идёт по редиректам вручную, проверяя каждый адрес заново."""
@@ -1234,7 +1252,7 @@ class Downloader:
         if canonical in self.cache:
             cached = self.cache[canonical]
             return url if cached is None else cached
-        masked = mask_url(canonical)
+        display = self.display_url(canonical)
         result = url
         proxy_hint = (
             tr("proxy_hint", proxy=self.proxy_label) if self.proxy_label else ""
@@ -1259,14 +1277,16 @@ class Downloader:
             relative = relative_path_for_markdown(destination, self.base_dir)
             result = relative
             self.downloaded += 1
-            print(tr("downloaded_file", url=masked, path=relative))
+            print(tr("downloaded_file", url=display, path=relative))
         except requests.RequestException as error:
             self.failed += 1
             print(
                 tr(
                     "download_failed",
-                    url=masked,
-                    error=safe_error(error, canonical),
+                    url=display,
+                    error=safe_error(
+                        error, canonical, verbose=self.verbose
+                    ),
                     hint=proxy_hint,
                 ),
                 file=sys.stderr,
@@ -1274,7 +1294,7 @@ class Downloader:
         except DownloadRejected as error:
             self.failed += 1
             print(
-                tr("download_failed", url=masked, error=error, hint=""),
+                tr("download_failed", url=display, error=error, hint=""),
                 file=sys.stderr,
             )
         except OSError as error:
@@ -1282,8 +1302,10 @@ class Downloader:
             print(
                 tr(
                     "save_failed",
-                    url=masked,
-                    error=safe_error(error, canonical),
+                    url=display,
+                    error=safe_error(
+                        error, canonical, verbose=self.verbose
+                    ),
                 ),
                 file=sys.stderr,
             )
@@ -1506,6 +1528,11 @@ def build_parser() -> LocalizedArgumentParser:
         help=tr("help_lang"),
     )
     parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help=tr("help_verbose"),
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {VERSION}",
@@ -1568,6 +1595,7 @@ def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
             session,
             proxy_label,
             allow_private=args.allow_private,
+            verbose=args.verbose,
         )
         try:
             data = source_path.read_bytes()

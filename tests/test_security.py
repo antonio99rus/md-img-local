@@ -11,11 +11,19 @@ URL = "http://example.com/pic.png"
 
 
 def make_downloader(
-    script, tmp_path: Path, session: FakeSession, allow_private: bool = False
+    script,
+    tmp_path: Path,
+    session: FakeSession,
+    allow_private: bool = False,
+    verbose: bool = False,
 ):
     media_dir = tmp_path / "media"
     return script.Downloader(
-        media_dir, tmp_path, session, allow_private=allow_private
+        media_dir,
+        tmp_path,
+        session,
+        allow_private=allow_private,
+        verbose=verbose,
     )
 
 
@@ -256,3 +264,56 @@ def test_error_log_masks_url_from_exception(script, tmp_path, capsys):
     assert "token=***" in captured.err
     assert "secretvalue" not in captured.out
     assert "secretvalue" not in captured.err
+
+
+def test_verbose_success_log_shows_full_url(script, tmp_path, capsys):
+    secret_url = "http://example.com/pic.png?token=secretvalue"
+    session = FakeSession({secret_url: FakeResponse()})
+    downloader = make_downloader(script, tmp_path, session, verbose=True)
+
+    downloader.localize(secret_url)
+
+    captured = capsys.readouterr()
+    assert secret_url in captured.out
+    assert "token=secretvalue" in captured.out
+
+
+def test_verbose_error_log_shows_full_url(script, tmp_path, capsys):
+    secret_url = "http://example.com/pic.png?token=secretvalue"
+    session = FakeSession(
+        {secret_url: requests.ConnectionError(f"failed for {secret_url}")}
+    )
+    downloader = make_downloader(script, tmp_path, session, verbose=True)
+
+    downloader.localize(secret_url)
+
+    captured = capsys.readouterr()
+    assert secret_url in captured.err
+    assert "token=secretvalue" in captured.err
+
+
+def test_verbose_safe_error_neutralizes_control_characters(script):
+    url = "http://example.com/a\x1b.png?token=secretvalue"
+
+    text = script.safe_error(ValueError(f"failed for {url}"), url, verbose=True)
+
+    assert "\x1b" not in text
+    assert "a?.png" in text
+    assert "token=secretvalue" in text
+
+
+def test_verbose_does_not_reveal_proxy_password(
+    script, run_main, tmp_path, fake_session, capsys
+):
+    path = tmp_path / "note.md"
+    path.write_text(f"![a]({URL})\n", encoding="utf-8")
+
+    run_main(
+        path,
+        "--proxy=http://user:secret@127.0.0.1:3128",
+        "--verbose",
+    )
+
+    combined = "".join(capsys.readouterr())
+    assert "secret" not in combined
+    assert "user:***@127.0.0.1:3128" in combined
