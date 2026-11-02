@@ -236,7 +236,7 @@ def test_crlf_line_endings_are_preserved(run_main, tmp_path, fake_session):
 
 def test_missing_final_newline_is_preserved(run_main, tmp_path, fake_session):
     path = tmp_path / "note.md"
-    path.write_bytes(f"![a]({URL})".encode("utf-8"))
+    path.write_bytes(f"![a]({URL})".encode())
 
     run_main(path)
 

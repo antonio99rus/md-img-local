@@ -150,9 +150,10 @@ MD_IMG_LOCAL_LANG=ru python md-img-local.py note.md
 ## Тесты
 
 ```bash
-uv sync                # заодно поставит dev-зависимости (pytest, pytest-cov)
+uv sync                # заодно поставит dev-зависимости (pytest, pytest-cov, ruff)
 uv run pytest          # запуск тестов
 uv run pytest --cov    # запуск с отчётом о покрытии
+uv run ruff check .    # запуск линтера
 ```
 
 Без `uv`: `pip install pytest pytest-cov`, затем `pytest`. На Python 3.10 dev-зависимости дополнительно ставят `tomli`, чтобы тесты могли читать `pyproject.toml`.

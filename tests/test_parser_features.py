@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from helpers import FakeResponse, URL
+from helpers import URL, FakeResponse
 
 
 def write_md(tmp_path: Path, text: str) -> Path:

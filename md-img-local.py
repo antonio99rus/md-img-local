@@ -17,10 +17,9 @@ from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import quote, urljoin, urlparse, urlsplit, urlunsplit, unquote
+from urllib.parse import quote, unquote, urljoin, urlparse, urlsplit, urlunsplit
 
 import requests
-
 import truststore
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry

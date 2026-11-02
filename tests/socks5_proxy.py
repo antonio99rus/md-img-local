@@ -32,7 +32,7 @@ class Socks5Proxy:
     def url(self) -> str:
         return f"socks5://127.0.0.1:{self.port}"
 
-    def start(self) -> "Socks5Proxy":
+    def start(self) -> Socks5Proxy:
         self._thread.start()
         return self
 
@@ -44,14 +44,10 @@ class Socks5Proxy:
             handlers = list(self._handlers)
         # Будим релей, иначе его select() ждёт до 10 секунд и держит teardown.
         for item in sockets:
-            try:
+            with contextlib.suppress(OSError):
                 item.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            try:
+            with contextlib.suppress(OSError):
                 item.close()
-            except OSError:
-                pass
         self._server.close()
         for handler in handlers:
             handler.join(timeout=5)
@@ -68,7 +64,7 @@ class Socks5Proxy:
         while not self._stop.is_set():
             try:
                 connection, _ = self._server.accept()
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except OSError:
                 break
