@@ -1,6 +1,6 @@
 [project]
 name = "md-img-local"
-version = "1.2.0"
+version = "1.3.0"
 description = "Download images referenced from a Markdown file into media/ and rewrite links to local paths"
 readme = "README-EN-US.md"
 requires-python = ">=3.10"
