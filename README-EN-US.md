@@ -8,7 +8,7 @@ Three link syntaxes are supported:
 
 - inline: `![alt](https://example.com/img.png "title")`, including the angle-bracket form `<url>`;
 - reference-style: `![alt][id]` plus `[id]: https://example.com/img.png`; if a reference is defined more than once, the first definition wins and its title is preserved;
-- HTML: `<img src="https://example.com/img.png" ...>` with quoted or unquoted `src`, plus `srcset` on `<img>` and `<source>`.
+- HTML: `<img src="https://example.com/img.png" ...>` with quoted or unquoted `src`, `srcset` on `<img>` and `<source>`, and `<source src>` inside `<picture>`.
 
 Protocol-relative URLs (`//cdn.example/img.png`) are treated as HTTPS. Images inside fenced code blocks, inline code, HTML comments and escaped `\![...]` are left untouched. The same canonical URL is downloaded only once; local links are not modified.
 
@@ -144,7 +144,7 @@ The Russian documentation is in [README.md](README.md).
 
 ## Known limitations
 
-- Links are parsed with regular expressions; block structure (fenced and indented code) comes from `markdown-it-py`. `srcset` candidates are split on commas, so a URL containing an unescaped comma is not supported; `<source src>` (as opposed to `<source srcset>`) and `<picture>` markup outside `srcset` are not handled.
+- Links are parsed with regular expressions. `srcset` candidates follow the HTML parsing rules, so URLs containing commas are supported. `<source src>` is handled only inside `<picture>`; outside it, `<source>` is treated as audio/video markup, not an image.
 - Every remote candidate in `srcset` is downloaded, including all listed resolutions.
 - Images are downloaded sequentially.
 

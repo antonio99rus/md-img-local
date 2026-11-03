@@ -43,6 +43,16 @@ HTML_SRCSET_RE = re.compile(
     r"([^>]*>)",
     re.IGNORECASE | re.DOTALL,
 )
+HTML_SOURCE_SRC_RE = re.compile(
+    r"(<source\b[^>]*?\bsrc\s*=\s*)"
+    r"(?:([\"'])(.*?)\2|([^\s\"'>]+))"
+    r"([^>]*>)",
+    re.IGNORECASE | re.DOTALL,
+)
+PICTURE_RE = re.compile(
+    r"<picture\b[^>]*>.*?</picture>",
+    re.IGNORECASE | re.DOTALL,
+)
 REF_DEF_RE = re.compile(
     r"^[ \t]*\[([^\]]+)\]:[ \t]*(?:<([^>]+)>|([^\s]+))"
     r"(?:[ \t]+(\"(?:[^\"\\]|\\.)*\"|'[^']*'|\([^)]*\)))?"
@@ -1347,6 +1357,34 @@ class RunReport:
         return 1 if self.failed else 0
 
 
+def srcset_url_spans(value: str) -> list[tuple[int, int]]:
+    """Возвращает границы URL в srcset по правилам разбора HTML."""
+    spans: list[tuple[int, int]] = []
+    index = 0
+    length = len(value)
+    while index < length:
+        while index < length and (value[index].isspace() or value[index] == ","):
+            index += 1
+        if index >= length:
+            break
+        start = index
+        while index < length and not value[index].isspace():
+            index += 1
+        end = index
+        while end > start and value[end - 1] == ",":
+            end -= 1
+        if end > start:
+            spans.append((start, end))
+        if end != index:
+            # Запятые после URL — разделители кандидатов.
+            continue
+        while index < length and value[index] != ",":
+            index += 1
+        if index < length:
+            index += 1
+    return spans
+
+
 def rewrite(text: str, downloader: Downloader) -> RewriteResult:
     """Заменяет удалённые ссылки на локальные, не трогая код и комментарии."""
     protected_text, protected_regions = protect_markdown_regions(text)
@@ -1365,7 +1403,7 @@ def rewrite(text: str, downloader: Downloader) -> RewriteResult:
             return match.group(0)
         return f"![{alt}]({local}{' ' + title if title else ''})"
 
-    def replace_html(match: re.Match[str]) -> str:
+    def replace_html_src(match: re.Match[str]) -> str:
         quote = match.group(2)
         url = match.group(3) if quote else match.group(4)
         if not is_remote(url):
@@ -1380,27 +1418,26 @@ def rewrite(text: str, downloader: Downloader) -> RewriteResult:
         return f"{prefix}{local}{suffix}"
 
     def rewrite_srcset_value(value: str) -> tuple[str, bool]:
-        """Переписывает URL в srcset, сохраняя дескрипторы (1x, 480w и т. п.)."""
-        rewritten: list[str] = []
+        """Переписывает URL в srcset, сохраняя дескрипторы и оформление."""
+        pieces: list[str] = []
+        last = 0
         changed = False
-        for candidate in re.split(r",\s*", value):
-            stripped = candidate.strip()
-            if not stripped:
+        for start, end in srcset_url_spans(value):
+            url = value[start:end]
+            if not is_remote(url):
                 continue
-            parts = stripped.split(None, 1)
-            url = parts[0]
-            descriptor = f" {parts[1]}" if len(parts) > 1 else ""
-            if is_remote(url):
-                found_urls.add(canonical_url(url))
-                local = downloader.localize(url)
-                if local != url:
-                    rewritten.append(f"{local}{descriptor}")
-                    changed = True
-                    continue
-            rewritten.append(stripped)
+            found_urls.add(canonical_url(url))
+            local = downloader.localize(url)
+            if local == url:
+                continue
+            pieces.append(value[last:start])
+            pieces.append(local)
+            last = end
+            changed = True
         if not changed:
             return value, False
-        return ", ".join(rewritten), True
+        pieces.append(value[last:])
+        return "".join(pieces), True
 
     def replace_srcset(match: re.Match[str]) -> str:
         quote = match.group(2)
@@ -1440,8 +1477,14 @@ def rewrite(text: str, downloader: Downloader) -> RewriteResult:
         return f"![{alt}]({local}{' ' + title if title else ''})"
 
     new_text = INLINE_IMAGE_RE.sub(replace_inline, protected_text)
-    new_text = HTML_IMG_RE.sub(replace_html, new_text)
+    new_text = HTML_IMG_RE.sub(replace_html_src, new_text)
     new_text = HTML_SRCSET_RE.sub(replace_srcset, new_text)
+    new_text = PICTURE_RE.sub(
+        lambda match: HTML_SOURCE_SRC_RE.sub(
+            replace_html_src, match.group(0)
+        ),
+        new_text,
+    )
     new_text = REF_IMAGE_RE.sub(replace_ref_image, new_text)
 
     def drop_used_definitions(match: re.Match[str]) -> str:

@@ -156,6 +156,93 @@ def test_local_srcset_is_untouched(script, run_main, tmp_path, fake_session):
     assert fake_session.calls == []
 
 
+def test_srcset_url_with_comma_is_rewritten(
+    script, run_main, tmp_path, fake_session
+):
+    first = "http://example.com/a,b.png"
+    second = "http://example.com/c.png"
+    respond(fake_session, first, second)
+    path = write_md(tmp_path, f'<img srcset="{first} 1x, {second} 2x">\n')
+
+    run_main(path)
+
+    expected = (
+        f'<img srcset="{local_name(script, first)} 1x, '
+        f'{local_name(script, second)} 2x">'
+    )
+    assert expected in path.read_text(encoding="utf-8")
+
+
+def test_srcset_keeps_original_spacing(
+    script, run_main, tmp_path, fake_session
+):
+    first = "http://example.com/one.png"
+    second = "http://example.com/two.png"
+    respond(fake_session, first, second)
+    path = write_md(
+        tmp_path,
+        f'<img srcset="  {first}   1x ,{second}    2x  ">\n',
+    )
+
+    run_main(path)
+
+    expected = (
+        f'<img srcset="  {local_name(script, first)}   1x ,'
+        f'{local_name(script, second)}    2x  ">'
+    )
+    assert expected in path.read_text(encoding="utf-8")
+
+
+def test_srcset_data_url_with_comma_is_untouched(
+    script, run_main, tmp_path, fake_session
+):
+    data_url = "data:image/png;base64,AAAA"
+    remote = "http://example.com/b.png"
+    respond(fake_session, remote)
+    path = write_md(
+        tmp_path, f'<img srcset="{data_url} 1x, {remote} 2x">\n'
+    )
+
+    run_main(path)
+
+    expected = (
+        f'<img srcset="{data_url} 1x, '
+        f'{local_name(script, remote)} 2x">'
+    )
+    assert expected in path.read_text(encoding="utf-8")
+
+
+def test_source_src_inside_picture_is_rewritten(
+    script, run_main, tmp_path, fake_session
+):
+    remote = "http://example.com/source.png"
+    respond(fake_session, remote)
+    path = write_md(
+        tmp_path,
+        f'<picture><source src="{remote}" type="image/png"></picture>\n',
+    )
+
+    run_main(path)
+
+    expected = (
+        f'<picture><source src="{local_name(script, remote)}" '
+        'type="image/png"></picture>'
+    )
+    assert expected in path.read_text(encoding="utf-8")
+
+
+def test_source_src_outside_picture_is_untouched(
+    script, run_main, tmp_path, fake_session
+):
+    source = f'<source src="{URL}">\n'
+    path = write_md(tmp_path, source)
+
+    run_main(path)
+
+    assert path.read_text(encoding="utf-8") == source
+    assert fake_session.calls == []
+
+
 def test_first_reference_definition_wins(
     script, run_main, tmp_path, fake_session, capsys
 ):
