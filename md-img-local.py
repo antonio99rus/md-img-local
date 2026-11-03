@@ -13,7 +13,9 @@ import socket
 import ssl
 import sys
 import tempfile
+import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
@@ -84,6 +86,10 @@ REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 REQUEST_TIMEOUT = (10, 30)
 MAX_RETRIES = 2
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+# Параллельные загрузки: у каждого потока своя сессия и пул соединений.
+DEFAULT_DOWNLOAD_WORKERS = 4
+MAX_DOWNLOAD_WORKERS = 32
 
 # SVG намеренно отсутствует: это активный контент, опасный при публикации media.
 IMAGE_CONTENT_TYPES = {
@@ -172,6 +178,14 @@ MESSAGES: dict[str, dict[str, str]] = {
         "help_user_agent": (
             "User-Agent header for downloads "
             "(default: program name and version)"
+        ),
+        "help_jobs": (
+            "Number of parallel downloads, each with its own session "
+            f"(default: {DEFAULT_DOWNLOAD_WORKERS}, maximum: "
+            f"{MAX_DOWNLOAD_WORKERS})"
+        ),
+        "jobs_range": (
+            f"--jobs must be between 1 and {MAX_DOWNLOAD_WORKERS}"
         ),
         "help_lang": "Language of messages and help: en or ru (default: system locale)",
         "help_verbose": (
@@ -292,6 +306,14 @@ MESSAGES: dict[str, dict[str, str]] = {
         "help_user_agent": (
             "Заголовок User-Agent для скачивания "
             "(по умолчанию — имя и версия программы)"
+        ),
+        "help_jobs": (
+            "Число параллельных загрузок, у каждой своя сессия "
+            f"(по умолчанию — {DEFAULT_DOWNLOAD_WORKERS}, максимум — "
+            f"{MAX_DOWNLOAD_WORKERS})"
+        ),
+        "jobs_range": (
+            f"--jobs должен быть от 1 до {MAX_DOWNLOAD_WORKERS}"
         ),
         "help_lang": (
             "Язык сообщений и справки: en или ru (по умолчанию — локаль системы)"
@@ -492,6 +514,7 @@ LONG_OPTIONS = (
     "--verbose",
     "--version",
     "--user-agent",
+    "--jobs",
 )
 
 
@@ -1220,6 +1243,16 @@ def is_remote(url: str) -> bool:
     )
 
 
+@dataclass(frozen=True)
+class DownloadOutcome:
+    """Результат одной загрузки: локальный путь и готовое сообщение."""
+
+    canonical: str
+    local: str | None
+    message: str
+    to_stderr: bool
+
+
 class Downloader:
     def __init__(
         self,
@@ -1229,6 +1262,8 @@ class Downloader:
         proxy_label: str | None = None,
         allow_private: bool = False,
         verbose: bool = False,
+        session_factory: Callable[[], requests.Session] | None = None,
+        workers: int = DEFAULT_DOWNLOAD_WORKERS,
     ) -> None:
         self.media_dir = media_dir
         self.base_dir = base_dir
@@ -1236,20 +1271,27 @@ class Downloader:
         self.proxy_label = proxy_label
         self.allow_private = allow_private
         self.verbose = verbose
+        self.session_factory = session_factory
+        self.workers = max(1, min(workers, MAX_DOWNLOAD_WORKERS))
         self.cache: dict[str, str | None] = {}
         self.downloaded = 0
         self.failed = 0
+        self._local = threading.local()
+        self._worker_sessions: list[requests.Session] = []
 
     def display_url(self, url: str) -> str:
         """Полный URL только в режиме --verbose; иначе секреты маскируются."""
         return sanitize_text(url) if self.verbose else mask_url(url)
 
-    def fetch(self, url: str) -> requests.Response:
+    def fetch(
+        self, url: str, session: requests.Session | None = None
+    ) -> requests.Response:
         """Идёт по редиректам вручную, проверяя каждый адрес заново."""
+        active = self.session if session is None else session
         current = url
         for _ in range(MAX_REDIRECTS + 1):
             ensure_url_allowed(current, self.allow_private)
-            response = self.session.get(
+            response = active.get(
                 current,
                 stream=True,
                 timeout=REQUEST_TIMEOUT,
@@ -1264,21 +1306,17 @@ class Downloader:
             current = urljoin(current, location)
         raise UrlBlocked(tr("redirect_too_many", limit=MAX_REDIRECTS))
 
-    def localize(self, url: str) -> str:
-        if not is_remote(url):
-            return url
-        canonical = canonical_url(url)
-        if canonical in self.cache:
-            cached = self.cache[canonical]
-            return url if cached is None else cached
+    def _download(
+        self, canonical: str, session: requests.Session
+    ) -> DownloadOutcome:
+        """Скачивает один URL, не трогая счётчики и кэш (это делает вызывающий)."""
         display = self.display_url(canonical)
-        result = url
         proxy_hint = (
             tr("proxy_hint", proxy=self.proxy_label) if self.proxy_label else ""
         )
         response = None
         try:
-            response = self.fetch(canonical)
+            response = self.fetch(canonical, session)
             response.raise_for_status()
             content_type = content_type_of(response)
             if content_type not in IMAGE_CONTENT_TYPES:
@@ -1294,45 +1332,122 @@ class Downloader:
             destination = self.media_dir / filename
             store_download(self.media_dir, destination, data)
             relative = relative_path_for_markdown(destination, self.base_dir)
-            result = relative
-            self.downloaded += 1
-            print(tr("downloaded_file", url=display, path=relative))
+            return DownloadOutcome(
+                canonical,
+                relative,
+                tr("downloaded_file", url=display, path=relative),
+                False,
+            )
         except requests.RequestException as error:
-            self.failed += 1
-            print(
+            return DownloadOutcome(
+                canonical,
+                None,
                 tr(
                     "download_failed",
                     url=display,
-                    error=safe_error(
-                        error, canonical, verbose=self.verbose
-                    ),
+                    error=safe_error(error, canonical, verbose=self.verbose),
                     hint=proxy_hint,
                 ),
-                file=sys.stderr,
+                True,
             )
         except DownloadRejected as error:
-            self.failed += 1
-            print(
+            return DownloadOutcome(
+                canonical,
+                None,
                 tr("download_failed", url=display, error=error, hint=""),
-                file=sys.stderr,
+                True,
             )
         except OSError as error:
-            self.failed += 1
-            print(
+            return DownloadOutcome(
+                canonical,
+                None,
                 tr(
                     "save_failed",
                     url=display,
-                    error=safe_error(
-                        error, canonical, verbose=self.verbose
-                    ),
+                    error=safe_error(error, canonical, verbose=self.verbose),
                 ),
-                file=sys.stderr,
+                True,
             )
         finally:
             if response is not None:
                 response.close()
-        self.cache[canonical] = None if result == url else result
-        return result
+
+    def _record(self, outcome: DownloadOutcome) -> None:
+        """Сохраняет результат в кэш, обновляет счётчики и печатает сообщение."""
+        self.cache[outcome.canonical] = outcome.local
+        if outcome.to_stderr:
+            self.failed += 1
+        else:
+            self.downloaded += 1
+        print(
+            outcome.message,
+            file=sys.stderr if outcome.to_stderr else sys.stdout,
+        )
+
+    def _worker_session(self) -> requests.Session:
+        """Даёт потоку собственную сессию: requests.Session не потокобезопасна."""
+        session = getattr(self._local, "session", None)
+        if session is None:
+            session = (
+                self.session_factory()
+                if self.session_factory is not None
+                else self.session
+            )
+            self._local.session = session
+            if self.session_factory is not None:
+                self._worker_sessions.append(session)
+        return session
+
+    def prefetch(self, urls: Iterable[str]) -> None:
+        """Скачивает уникальные URL заранее, параллельно по нескольким сессиям.
+
+        Без ``session_factory`` загрузки идут последовательно в общей сессии.
+        Результаты печатаются в порядке появления URL, как и при последовательной
+        работе.
+        """
+        pending: list[str] = []
+        seen: set[str] = set()
+        for url in urls:
+            if not is_remote(url):
+                continue
+            canonical = canonical_url(url)
+            if canonical in self.cache or canonical in seen:
+                continue
+            seen.add(canonical)
+            pending.append(canonical)
+        if not pending:
+            return
+
+        worker_count = min(self.workers, len(pending))
+        if worker_count <= 1 or self.session_factory is None:
+            for canonical in pending:
+                self._record(self._download(canonical, self.session))
+            return
+
+        def work(canonical: str) -> DownloadOutcome:
+            return self._download(canonical, self._worker_session())
+
+        try:
+            with ThreadPoolExecutor(max_workers=worker_count) as pool:
+                futures = [pool.submit(work, canonical) for canonical in pending]
+                for future in futures:
+                    # result() в порядке отправки сохраняет порядок логов.
+                    self._record(future.result())
+        finally:
+            for session in self._worker_sessions:
+                session.close()
+            self._worker_sessions.clear()
+
+    def localize(self, url: str) -> str:
+        if not is_remote(url):
+            return url
+        canonical = canonical_url(url)
+        if canonical in self.cache:
+            cached = self.cache[canonical]
+            return url if cached is None else cached
+        outcome = self._download(canonical, self.session)
+        self._record(outcome)
+        return url if outcome.local is None else outcome.local
 
 
 @dataclass(frozen=True)
@@ -1385,9 +1500,60 @@ def srcset_url_spans(value: str) -> list[tuple[int, int]]:
     return spans
 
 
+def _ref_definitions(text: str) -> dict[str, tuple[str, str]]:
+    """Возвращает определения reference-ссылок; при дубликате побеждает первое."""
+    definitions: dict[str, tuple[str, str]] = {}
+    for match in REF_DEF_RE.finditer(text):
+        url = match.group(2) or match.group(3)
+        if url:
+            title = match.group(4) or ""
+            definitions.setdefault(match.group(1).lower(), (url, title))
+    return definitions
+
+
+def collect_remote_urls(
+    text: str, ref_defs: Mapping[str, tuple[str, str]]
+) -> list[str]:
+    """Собирает URL, которые rewrite() заменит, в порядке появления.
+
+    Разбор повторяет те же регулярные выражения, что и замена, поэтому список
+    совпадает с набором реально скачиваемых ссылок.
+    """
+    urls: list[str] = []
+
+    def add(url: str) -> None:
+        if is_remote(url):
+            urls.append(url)
+
+    def add_html_src(match: re.Match[str]) -> None:
+        quote = match.group(2)
+        add(match.group(3) if quote else match.group(4))
+
+    for match in INLINE_IMAGE_RE.finditer(text):
+        add(match.group(2) or match.group(3))
+    for match in HTML_IMG_RE.finditer(text):
+        add_html_src(match)
+    for match in HTML_SRCSET_RE.finditer(text):
+        value = match.group(3) if match.group(2) else match.group(4)
+        for start, end in srcset_url_spans(value):
+            add(value[start:end])
+    for picture in PICTURE_RE.finditer(text):
+        for match in HTML_SOURCE_SRC_RE.finditer(picture.group(0)):
+            add_html_src(match)
+    for match in REF_IMAGE_RE.finditer(text):
+        key = (match.group(2) or match.group(1)).lower()
+        definition = ref_defs.get(key)
+        if definition is not None:
+            add(definition[0])
+    return urls
+
+
 def rewrite(text: str, downloader: Downloader) -> RewriteResult:
     """Заменяет удалённые ссылки на локальные, не трогая код и комментарии."""
     protected_text, protected_regions = protect_markdown_regions(text)
+    ref_defs = _ref_definitions(protected_text)
+    # Сначала скачиваем всё параллельно, затем подставляем результаты из кэша.
+    downloader.prefetch(collect_remote_urls(protected_text, ref_defs))
 
     found_urls: set[str] = set()
 
@@ -1449,14 +1615,6 @@ def rewrite(text: str, downloader: Downloader) -> RewriteResult:
         if quote:
             return f"{prefix}{quote}{rewritten}{quote}{suffix}"
         return f"{prefix}{rewritten}{suffix}"
-
-    ref_defs: dict[str, tuple[str, str]] = {}
-    for match in REF_DEF_RE.finditer(protected_text):
-        url = match.group(2) or match.group(3)
-        title = match.group(4) or ""
-        if url:
-            # CommonMark: при дубликатах побеждает первое определение.
-            ref_defs.setdefault(match.group(1).lower(), (url, title))
 
     replaced_ref_keys: set[str] = set()
 
@@ -1574,6 +1732,13 @@ def build_parser() -> LocalizedArgumentParser:
         help=tr("help_user_agent"),
     )
     parser.add_argument(
+        "--jobs",
+        type=int,
+        default=DEFAULT_DOWNLOAD_WORKERS,
+        metavar="N",
+        help=tr("help_jobs"),
+    )
+    parser.add_argument(
         "--lang",
         choices=LANGUAGES,
         default=None,
@@ -1611,6 +1776,8 @@ def main() -> int:
 def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     if args.no_backup and not args.force and args.write_mode == "in-place":
         parser.error(tr("no_backup_requires_force"))
+    if args.jobs < 1 or args.jobs > MAX_DOWNLOAD_WORKERS:
+        parser.error(tr("jobs_range"))
 
     try:
         proxy = parse_proxy(args.proxy)
@@ -1639,7 +1806,10 @@ def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     if proxy_label:
         print(tr("proxy_banner", proxy=proxy_label))
 
-    session = build_session(proxy, args.user_agent)
+    def session_factory() -> requests.Session:
+        return build_session(proxy, args.user_agent)
+
+    session = session_factory()
     try:
         downloader = Downloader(
             media_dir,
@@ -1648,6 +1818,8 @@ def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
             proxy_label,
             allow_private=args.allow_private,
             verbose=args.verbose,
+            session_factory=session_factory,
+            workers=args.jobs,
         )
         try:
             data = source_path.read_bytes()

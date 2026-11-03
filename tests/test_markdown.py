@@ -382,3 +382,39 @@ def test_report_counts(script, run_main, tmp_path, fake_session, capsys):
     assert "Unique images found: 2" in output
     assert "Downloaded: 2" in output
     assert "Errors: 0" in output
+
+
+def test_jobs_must_be_positive(script, run_main, tmp_path, fake_session, capsys):
+    path = write_md(tmp_path, f"![a]({URL})\n")
+
+    with pytest.raises(SystemExit) as error:
+        run_main(path, "--jobs=0")
+
+    assert error.value.code == 2
+    assert "--jobs" in capsys.readouterr().err
+    assert fake_session.calls == []
+
+
+def test_jobs_above_maximum_is_rejected(
+    script, run_main, tmp_path, fake_session, capsys
+):
+    path = write_md(tmp_path, f"![a]({URL})\n")
+
+    with pytest.raises(SystemExit) as error:
+        run_main(path, f"--jobs={script.MAX_DOWNLOAD_WORKERS + 1}")
+
+    assert error.value.code == 2
+    assert "--jobs" in capsys.readouterr().err
+    assert fake_session.calls == []
+
+
+def test_jobs_one_downloads_in_document_order(
+    script, run_main, tmp_path, fake_session
+):
+    second = "http://example.com/second.png"
+    fake_session.responses[second] = FakeResponse()
+    path = write_md(tmp_path, f"![a]({URL})\n![b]({second})\n")
+
+    run_main(path, "--jobs=1")
+
+    assert [url for url, _ in fake_session.calls] == [URL, second]

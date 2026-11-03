@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -221,6 +222,87 @@ def test_localize_returns_original_url_after_cached_failure(script, tmp_path):
     assert first == f"{base}#one"
     assert second == f"{base}#two"
     assert len(session.calls) == 1
+
+
+def test_prefetch_downloads_each_url_once(script, tmp_path):
+    first = "http://example.com/a.png"
+    second = "http://example.com/b.png"
+    session = FakeSession({first: FakeResponse(), second: FakeResponse()})
+    downloader = make_downloader(script, tmp_path, session)
+
+    downloader.prefetch([first, second, f"{first}#fragment", "media/local.png"])
+
+    assert [url for url, _ in session.calls] == [first, second]
+    assert downloader.downloaded == 2
+    assert downloader.failed == 0
+    assert downloader.localize(first) == downloader.cache[first]
+
+
+def test_prefetch_skips_local_urls(script, tmp_path):
+    session = FakeSession()
+
+    make_downloader(script, tmp_path, session).prefetch(
+        ["media/a.png", "data:image/png;base64,AAAA"]
+    )
+
+    assert session.calls == []
+
+
+def test_prefetch_runs_downloads_in_parallel(script, tmp_path):
+    urls = [f"http://example.com/{index}.png" for index in range(4)]
+    barrier = threading.Barrier(2, timeout=5)
+    created: list[FakeSession] = []
+
+    class BlockingSession(FakeSession):
+        def get(self, url, **kwargs):
+            # Два потока должны встретиться здесь: последовательный код упадёт.
+            barrier.wait()
+            return super().get(url, **kwargs)
+
+    def factory() -> BlockingSession:
+        session = BlockingSession({url: FakeResponse() for url in urls})
+        created.append(session)
+        return session
+
+    downloader = script.Downloader(
+        tmp_path / "media",
+        tmp_path,
+        FakeSession(),
+        session_factory=factory,
+        workers=2,
+    )
+
+    downloader.prefetch(urls)
+
+    assert downloader.downloaded == 4
+    assert len(created) == 2
+    assert sum(len(session.calls) for session in created) == 4
+    assert all(session.closed for session in created)
+
+
+def test_prefetch_keeps_report_order(script, tmp_path, capsys):
+    urls = [f"http://example.com/{index}.png" for index in range(4)]
+    session = FakeSession({url: FakeResponse() for url in urls})
+    downloader = make_downloader(script, tmp_path, session)
+
+    downloader.prefetch(urls)
+
+    output = capsys.readouterr().out
+    positions = [output.index(url) for url in urls]
+    assert positions == sorted(positions)
+
+
+def test_prefetch_keeps_failed_urls_in_place(script, tmp_path):
+    first = "http://example.com/a.png"
+    broken = "http://example.com/broken.png"
+    session = FakeSession({first: FakeResponse(), broken: requests.ConnectionError("boom")})
+    downloader = make_downloader(script, tmp_path, session)
+
+    downloader.prefetch([first, broken])
+
+    assert downloader.downloaded == 1
+    assert downloader.failed == 1
+    assert downloader.cache[broken] is None
 
 
 def test_filename_for_url_limits_stem_length(script):

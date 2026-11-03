@@ -288,3 +288,26 @@ def test_first_reference_title_wins(script, run_main, tmp_path, fake_session):
     text = path.read_text(encoding="utf-8")
     assert f'![a]({local_name(script, first)} "First")' in text
     assert "Second" not in text
+
+
+def test_collect_remote_urls_matches_rewrite(script):
+    text = (
+        f"![a]({URL})\n"
+        '<img src="http://example.com/html.png">\n'
+        '<img srcset="http://example.com/set.png 1x, media/b.png 2x">\n'
+        '<picture><source src="http://example.com/source.png"></picture>\n'
+        "![ref][pic]\n\n"
+        '[pic]: http://example.com/ref.png "Ref"\n'
+        "[unused]: http://example.com/unused.png\n"
+    )
+    ref_defs = script._ref_definitions(text)
+
+    urls = script.collect_remote_urls(text, ref_defs)
+
+    assert urls == [
+        URL,
+        "http://example.com/html.png",
+        "http://example.com/set.png",
+        "http://example.com/source.png",
+        "http://example.com/ref.png",
+    ]

@@ -50,6 +50,7 @@ python md-img-local.py <file.md> [options]
 | `--allow-private` | Allow downloads from private, loopback and link-local addresses. Disabled by default to prevent SSRF. |
 | `--proxy URL` | Download through a proxy, e.g. `socks5://127.0.0.1:3066`. An explicit proxy overrides the proxy environment variables. |
 | `--user-agent STRING` | `User-Agent` header for downloads. Defaults to `md-img-local/<version>`. |
+| `--jobs N` | Number of parallel downloads, each with its own session. Defaults to 4, maximum 32; `--jobs 1` downloads sequentially. |
 | `--lang en\|ru` | Language of messages and help. Defaults to the system locale. |
 | `--verbose` | Print full URLs in logs instead of masked ones. Proxy passwords are still masked. |
 | `--version` | Print the program version. |
@@ -79,7 +80,7 @@ python md-img-local.py note.md --proxy=socks5h://127.0.0.1:3066
 1. The Markdown file is read as bytes. UTF-8, UTF-16 and UTF-32 (with a BOM) are supported; the original BOM and line endings are preserved.
 2. Code blocks (fenced and indented, detected by `markdown-it-py`), inline code, HTML comments and escaped `!` are masked so examples are never rewritten or downloaded.
 3. Image links are collected and canonicalized: the fragment is removed, the scheme and host are lowercased, and default ports are dropped. Query strings are preserved; protocol-relative URLs are treated as HTTPS.
-4. Every unique image is downloaded into `media/`; the directory is created lazily on the first successful download.
+4. Every unique image is downloaded into `media/`; the directory is created lazily on the first successful download. Downloads run in parallel (`--jobs`, default 4) with one session per thread, and messages are printed in document order.
 5. Links are replaced with POSIX-style paths relative to the Markdown file. Spaces and special characters are percent-encoded for Markdown and HTML; `srcset` descriptors such as `1x` and `480w` are preserved.
 6. A backup is created (unless disabled), then the result is written back using the selected write mode.
 7. A report is printed to stdout: unique images found, downloaded, and errors.
@@ -146,7 +147,6 @@ The Russian documentation is in [README.md](README.md).
 
 - Links are parsed with regular expressions. `srcset` candidates follow the HTML parsing rules, so URLs containing commas are supported. `<source src>` is handled only inside `<picture>`; outside it, `<source>` is treated as audio/video markup, not an image.
 - Every remote candidate in `srcset` is downloaded, including all listed resolutions.
-- Images are downloaded sequentially.
 
 ## Tests
 

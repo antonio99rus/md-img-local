@@ -140,6 +140,8 @@ def test_all_languages_cover_required_messages(script):
         "help_allow_private",
         "help_proxy",
         "help_user_agent",
+        "help_jobs",
+        "jobs_range",
         "help_lang",
         "help_verbose",
         "help_version",
