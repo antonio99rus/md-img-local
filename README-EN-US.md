@@ -150,10 +150,11 @@ The Russian documentation is in [README.md](README.md).
 ## Tests
 
 ```bash
-uv sync                # also installs the dev dependencies (pytest, pytest-cov, ruff)
+uv sync                # also installs the dev dependencies (pytest, pytest-cov, ruff, mypy)
 uv run pytest          # run the tests
 uv run pytest --cov    # run with a coverage report
 uv run ruff check .    # run the linter
+uv run mypy            # run the type checker
 ```
 
 Without `uv`: `pip install pytest pytest-cov`, then `pytest`. On Python 3.10 the dev dependencies also install `tomli` for reading `pyproject.toml` in the tests.

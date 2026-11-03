@@ -2,7 +2,7 @@
 
 Версия — 1.2.0. Документ описывает фактическую реализацию после рефакторинга, а не только исходный замысел.
 
-**Язык:** Python 3.10+. **Зависимости:** `requests[socks]`, `truststore`; dev — `pytest`, `pytest-cov`, `ruff`, `tomli` (только для Python 3.10). Пакет не устанавливается (`package = false`), запуск — `python md-img-local.py`.
+**Язык:** Python 3.10+. **Зависимости:** `requests[socks]`, `truststore`; dev — `pytest`, `pytest-cov`, `ruff`, `mypy` (со stubs `types-requests` и `types-PySocks`), `tomli` (только для Python 3.10). Пакет не устанавливается (`package = false`), запуск — `python md-img-local.py`.
 
 ## CLI
 
@@ -87,6 +87,7 @@ python md-img-local.py <файл.md>
 
 - `uv run pytest` — полный suite; `uv run pytest --cov` — покрытие.
 - `uv run ruff check .` — линтер; конфигурация в `pyproject.toml` (`py310`, правила `E4/E7/E9/F/I/UP/B/SIM`).
+- `uv run mypy` — строгая проверка типов основного скрипта (`strict = true`, Python 3.10).
 - Тесты герметичны: autouse-фикстура подменяет DNS (литералы как есть, имена → публичный IP), язык фиксируется на английском.
 - Есть регрессии на код/комментарии, пробелы и спецсимволы в путях, BOM/CRLF/LF, protocol-relative URL, `src` без кавычек, `srcset`/`<source srcset>`, первое определение reference и сохранение title, лимиты и типы, SSRF, маскирование секретов и `--verbose`, TLS с самоподписанным сертификатом, коды возврата, режимы записи, симлинки, ротацию бэкапов, локализацию и реальную сборку сессии.
 - `Socks5Proxy` отслеживает сокеты и потоки и закрывает их в teardown; недоступный прокси проверяется на занятом порту без TOCTOU.
@@ -94,5 +95,5 @@ python md-img-local.py <файл.md>
 
 ## Осталось
 
-- Добавить CI-матрицу Python 3.10–3.14 и `mypy`.
+- Добавить CI-матрицу Python 3.10–3.14.
 - При необходимости заменить regex-парсер на AST (`markdown-it-py`/`mistune`) и добавить параллельное скачивание с сессией на поток. Ограничения текущего парсера: `srcset` делится по запятым, `<source src>` и `<picture>` вне `srcset` не обрабатываются.

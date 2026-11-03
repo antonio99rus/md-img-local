@@ -13,10 +13,11 @@ import socket
 import ssl
 import sys
 import tempfile
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NoReturn
 from urllib.parse import quote, unquote, urljoin, urlparse, urlsplit, urlunsplit
 
 import requests
@@ -543,21 +544,27 @@ def localize_argparse_message(message: str) -> str:
 
 
 class LocalizedHelpFormatter(argparse.HelpFormatter):
-    def add_usage(self, usage, actions, groups, prefix=None):
+    def add_usage(
+        self,
+        usage: str | None,
+        actions: Iterable[argparse.Action],
+        groups: Iterable[argparse._MutuallyExclusiveGroup],
+        prefix: str | None = None,
+    ) -> None:
         if prefix is None:
             prefix = tr("usage_prefix")
         return super().add_usage(usage, actions, groups, prefix=prefix)
 
-    def start_section(self, heading):
+    def start_section(self, heading: str | None) -> None:
         titles = {
             "positional arguments": tr("positional_title"),
             "options": tr("options_title"),
         }
-        return super().start_section(titles.get(heading, heading))
+        return super().start_section(titles.get(heading or "", heading))
 
 
 class LocalizedArgumentParser(argparse.ArgumentParser):
-    def error(self, message: str) -> None:
+    def error(self, message: str) -> NoReturn:
         self.print_usage(sys.stderr)
         translated = localize_argparse_message(message)
         self.exit(
@@ -797,7 +804,7 @@ def resolve_host_ips(host: str) -> list[str]:
     """Резолвит хост через системный DNS и возвращает уникальные адреса."""
     addresses: list[str] = []
     for info in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM):
-        address = info[4][0]
+        address = str(info[4][0])
         if address not in addresses:
             addresses.append(address)
     return addresses
@@ -1216,7 +1223,7 @@ class Downloader:
         self.proxy_label = proxy_label
         self.allow_private = allow_private
         self.verbose = verbose
-        self.cache: dict[str, str] = {}
+        self.cache: dict[str, str | None] = {}
         self.downloaded = 0
         self.failed = 0
 
