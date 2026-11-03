@@ -6,6 +6,7 @@ readme = "README-EN-US.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 dependencies = [
+    "markdown-it-py>=4.0",
     "requests[socks]>=2.31",
     "truststore>=0.8",
 ]

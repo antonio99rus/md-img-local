@@ -22,6 +22,7 @@ from urllib.parse import quote, unquote, urljoin, urlparse, urlsplit, urlunsplit
 
 import requests
 import truststore
+from markdown_it import MarkdownIt
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -49,10 +50,12 @@ REF_DEF_RE = re.compile(
     re.MULTILINE,
 )
 
-FENCE_RE = re.compile(r"^( {0,3})(`{3,}|~{3,})(.*)$")
 HTML_COMMENT_RE = re.compile(r"<!--.*?(?:-->|\Z)", re.DOTALL)
 INLINE_CODE_RE = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)", re.DOTALL)
 ESCAPED_BANG_RE = re.compile(r"(?<!\\)(?:\\\\)*\\!")
+
+# CommonMark-парсер нужен только для точного определения блоков кода.
+MARKDOWN_PARSER = MarkdownIt("commonmark")
 
 BOM_ENCODINGS = (
     (codecs.BOM_UTF32_LE, "utf-32-le"),
@@ -1143,34 +1146,34 @@ def _write_in_place(
         os.close(descriptor)
 
 
-def _protect_fenced_code(text: str, stash: Callable[[str], str]) -> str:
+def _code_block_ranges(text: str) -> list[tuple[int, int]]:
+    """Возвращает диапазоны строк с fenced и indented code по CommonMark."""
+    ranges: list[tuple[int, int]] = []
+    for token in MARKDOWN_PARSER.parse(text):
+        if token.type in {"fence", "code_block"} and token.map is not None:
+            ranges.append((token.map[0], token.map[1]))
+    return ranges
+
+
+def _protect_code_blocks(text: str, stash: Callable[[str], str]) -> str:
     lines = text.splitlines(keepends=True)
+    protected = [False] * len(lines)
+    for start, end in _code_block_ranges(text):
+        for index in range(start, min(end, len(lines))):
+            protected[index] = True
+
     result: list[str] = []
     index = 0
     while index < len(lines):
-        opening = FENCE_RE.match(lines[index])
-        if opening is None:
+        if not protected[index]:
             result.append(lines[index])
             index += 1
             continue
-
-        fence = opening.group(2)
-        fence_char = fence[0]
-        fence_length = len(fence)
-        block = [lines[index]]
-        index += 1
-        while index < len(lines):
-            block.append(lines[index])
-            closing = FENCE_RE.match(lines[index])
-            index += 1
-            if (
-                closing is not None
-                and closing.group(2)[0] == fence_char
-                and len(closing.group(2)) >= fence_length
-                and not closing.group(3).strip()
-            ):
-                break
-        result.append(stash("".join(block)))
+        stop = index
+        while stop < len(lines) and protected[stop]:
+            stop += 1
+        result.append(stash("".join(lines[index:stop])))
+        index = stop
     return "".join(result)
 
 
@@ -1185,7 +1188,7 @@ def protect_markdown_regions(text: str) -> tuple[str, list[tuple[str, str]]]:
         regions.append((token, value))
         return token
 
-    text = _protect_fenced_code(text, stash)
+    text = _protect_code_blocks(text, stash)
     text = HTML_COMMENT_RE.sub(lambda match: stash(match.group(0)), text)
     text = INLINE_CODE_RE.sub(lambda match: stash(match.group(0)), text)
     text = ESCAPED_BANG_RE.sub(lambda match: stash(match.group(0)), text)

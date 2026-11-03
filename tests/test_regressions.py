@@ -143,10 +143,6 @@ def test_text_outside_fence_is_still_rewritten(
     assert len(fake_session.calls) == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="indented code blocks require a real Markdown parser",
-)
 def test_indented_code_is_not_rewritten(run_main, tmp_path, fake_session):
     source = f"    ![a]({URL})\n"
     path = write_md(tmp_path, source)
@@ -154,6 +150,32 @@ def test_indented_code_is_not_rewritten(run_main, tmp_path, fake_session):
     run_main(path)
 
     assert path.read_text(encoding="utf-8") == source
+
+
+def test_indented_code_inside_list_is_not_rewritten(
+    run_main, tmp_path, fake_session
+):
+    source = f"- item\n\n      ![a]({URL})\n"
+    path = write_md(tmp_path, source)
+
+    run_main(path)
+
+    assert path.read_text(encoding="utf-8") == source
+    assert fake_session.calls == []
+
+
+def test_indented_code_does_not_hide_following_image(
+    run_main, tmp_path, fake_session
+):
+    source = f"    ![code]({URL})\n\n![real]({URL})\n"
+    path = write_md(tmp_path, source)
+
+    run_main(path)
+
+    text = path.read_text(encoding="utf-8")
+    assert f"    ![code]({URL})" in text
+    assert "![real](media/" in text
+    assert len(fake_session.calls) == 1
 
 
 def test_fence_inside_blockquote_is_not_rewritten(

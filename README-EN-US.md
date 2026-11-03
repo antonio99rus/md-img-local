@@ -16,6 +16,7 @@ Protocol-relative URLs (`//cdn.example/img.png`) are treated as HTTPS. Images in
 
 - Python 3.10+;
 - [`requests`](https://pypi.org/project/requests/) with the `socks` extra (required for SOCKS proxies);
+- [`markdown-it-py`](https://pypi.org/project/markdown-it-py/) for CommonMark block detection;
 - [`truststore`](https://pypi.org/project/truststore/) for TLS verification against the operating system trust store.
 
 ## Installation
@@ -30,7 +31,7 @@ uv run python md-img-local.py --help
 With `pip`:
 
 ```bash
-pip install "requests[socks]" truststore
+pip install "requests[socks]" markdown-it-py truststore
 ```
 
 ## Usage
@@ -76,7 +77,7 @@ python md-img-local.py note.md --proxy=socks5h://127.0.0.1:3066
 ## How it works
 
 1. The Markdown file is read as bytes. UTF-8, UTF-16 and UTF-32 (with a BOM) are supported; the original BOM and line endings are preserved.
-2. Code blocks, inline code, HTML comments and escaped `!` are masked so examples are never rewritten or downloaded.
+2. Code blocks (fenced and indented, detected by `markdown-it-py`), inline code, HTML comments and escaped `!` are masked so examples are never rewritten or downloaded.
 3. Image links are collected and canonicalized: the fragment is removed, the scheme and host are lowercased, and default ports are dropped. Query strings are preserved; protocol-relative URLs are treated as HTTPS.
 4. Every unique image is downloaded into `media/`; the directory is created lazily on the first successful download.
 5. Links are replaced with POSIX-style paths relative to the Markdown file. Spaces and special characters are percent-encoded for Markdown and HTML; `srcset` descriptors such as `1x` and `480w` are preserved.
@@ -143,7 +144,7 @@ The Russian documentation is in [README.md](README.md).
 
 ## Known limitations
 
-- Links are parsed with regular expressions. `srcset` candidates are split on commas, so a URL containing an unescaped comma is not supported; `<source src>` (as opposed to `<source srcset>`) and `<picture>` markup outside `srcset` are not handled.
+- Links are parsed with regular expressions; block structure (fenced and indented code) comes from `markdown-it-py`. `srcset` candidates are split on commas, so a URL containing an unescaped comma is not supported; `<source src>` (as opposed to `<source srcset>`) and `<picture>` markup outside `srcset` are not handled.
 - Every remote candidate in `srcset` is downloaded, including all listed resolutions.
 - Images are downloaded sequentially.
 
