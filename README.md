@@ -2,6 +2,8 @@
 
 [English version](README-EN-US.md)
 
+![CI](https://github.com/antonio99rus/md-img-local/actions/workflows/ci.yml/badge.svg)
+
 Скачивает изображения из Markdown-файла в `media/` (или указанный каталог) и заменяет ссылки на локальные.
 
 Поддерживаются три синтаксиса ссылок:
@@ -159,6 +161,8 @@ uv run mypy            # запуск проверки типов
 ```
 
 Без `uv`: `pip install pytest pytest-cov`, затем `pytest`. На Python 3.10 dev-зависимости дополнительно ставят `tomli`, чтобы тесты могли читать `pyproject.toml`.
+
+CI (GitHub Actions, `.github/workflows/ci.yml`) запускает `pytest`, `ruff check` и `mypy` на Python 3.10–3.14 под Linux и Windows.
 
 Тесты лежат в `tests/` и проверяют замену ссылок (inline, reference-style, HTML, защищённый код и комментарии), кодировки и переводы строк, ротацию бэкапов и режимы записи, лимиты скачивания и типы содержимого, SSRF и маскирование секретов, TLS с самоподписанным сертификатом, коды возврата CLI, локализацию и интеграционные сценарии с локальным HTTP-сервером и SOCKS5-прокси.
 
