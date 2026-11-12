@@ -2,8 +2,6 @@
 
 [Русская версия](README.md)
 
-![CI](https://github.com/antonio99rus/md-img-local/actions/workflows/ci.yml/badge.svg)
-
 Downloads images referenced by a Markdown file into `media/` (or a directory of your choice) and rewrites the links to local paths.
 
 Three link syntaxes are supported:

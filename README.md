@@ -2,8 +2,6 @@
 
 [English version](README-EN-US.md)
 
-![CI](https://github.com/antonio99rus/md-img-local/actions/workflows/ci.yml/badge.svg)
-
 Скачивает изображения из Markdown-файла в `media/` (или указанный каталог) и заменяет ссылки на локальные.
 
 Поддерживаются три синтаксиса ссылок:
