@@ -14,7 +14,9 @@
 
 Protocol-relative URL (`//cdn.example/img.png`) трактуются как HTTPS. Изображения внутри fenced-блоков, inline-кода, HTML-комментариев и экранированные `\![...]` не изменяются. Одинаковый канонический URL скачивается один раз; локальные ссылки не трогаются.
 
-## Требования
+## Документация
+
+- [English documentation](README-EN-US.md)
 
 - Python 3.10+;
 - [`requests`](https://pypi.org/project/requests/) с дополнением `socks` (нужно для SOCKS-прокси);
