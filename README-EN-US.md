@@ -160,8 +160,6 @@ uv run mypy            # run the type checker
 
 Without `uv`: `pip install pytest pytest-cov`, then `pytest`. On Python 3.10 the dev dependencies also install `tomli` for reading `pyproject.toml` in the tests.
 
-CI (GitHub Actions, `.github/workflows/ci.yml`) runs `pytest`, `ruff check` and `mypy` on Python 3.10–3.14 on Linux and Windows.
-
 The tests live in `tests/` and cover link rewriting (inline, reference-style, HTML, protected code and comments), encoding and line endings, backup rotation and write modes, download limits and content types, SSRF and secret masking, TLS with a self-signed certificate, CLI exit codes, localization, and integration scenarios with a local HTTP server and a SOCKS5 proxy.
 
 ## License
