@@ -1,3 +1,19 @@
+"""Download images referenced from a Markdown file into a local ``media/``.
+
+The program is intentionally distributed as a single script and is loaded by
+the test suite as a module.  It is organised in the following sections:
+
+* constants, translations and command-line localisation;
+* URL, proxy and log-sanitising helpers;
+* download policy (SSRF checks, HTTP session, size/type limits);
+* Markdown protection, extraction and link rewriting;
+* backup and crash-safe file writing;
+* argument parsing, orchestration and reporting.
+
+Public names are kept stable because the tests (and users) import this file
+directly rather than installing it as a package.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -19,7 +35,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, cast
 from urllib.parse import quote, unquote, urljoin, urlparse, urlsplit, urlunsplit
 
 import requests
@@ -77,7 +93,7 @@ BOM_ENCODINGS = (
     (codecs.BOM_UTF16_BE, "utf-16-be"),
 )
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 
 MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 DOWNLOAD_CHUNK_SIZE = 64 * 1024
@@ -494,9 +510,8 @@ def current_language() -> str:
 
 def tr(key: str, **kwargs: object) -> str:
     """Возвращает сообщение на текущем языке с откатом на английский."""
-    template = MESSAGES.get(current_language(), {}).get(key) or MESSAGES[
-        DEFAULT_LANGUAGE
-    ].get(key)
+    catalog = MESSAGES.get(current_language(), {})
+    template = catalog.get(key) or MESSAGES[DEFAULT_LANGUAGE].get(key)
     if template is None:
         return key
     return template.format(**kwargs)
@@ -731,13 +746,21 @@ def read_limited(response: requests.Response, limit: int) -> bytes:
     return bytes(buffer)
 
 
-def store_download(media_dir: Path, destination: Path, data: bytes) -> None:
-    """Пишет через уникальный temp и os.replace, не следуя симлинкам."""
-    media_dir.mkdir(parents=True, exist_ok=True)
+def _write_temp_file(
+    directory: Path,
+    prefix: str,
+    suffix: str,
+    data: bytes,
+) -> Path:
+    """Пишет данные в уникальный временный файл и возвращает его путь.
+
+    ``fsync`` гарантирует, что содержимое попадёт на диск до ``os.replace``.
+    При любой ошибке временный файл удаляется, а исключение пробрасывается.
+    """
     descriptor, temp_name = tempfile.mkstemp(
-        prefix=".md-img-local-",
-        suffix=".part",
-        dir=media_dir,
+        prefix=prefix,
+        suffix=suffix,
+        dir=directory,
     )
     temp_path = Path(temp_name)
     try:
@@ -745,6 +768,22 @@ def store_download(media_dir: Path, destination: Path, data: bytes) -> None:
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
+    return temp_path
+
+
+def store_download(media_dir: Path, destination: Path, data: bytes) -> None:
+    """Пишет через уникальный temp и os.replace, не следуя симлинкам."""
+    media_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = _write_temp_file(
+        media_dir,
+        prefix=".md-img-local-",
+        suffix=".part",
+        data=data,
+    )
+    try:
         os.replace(temp_path, destination)
     except BaseException:
         temp_path.unlink(missing_ok=True)
@@ -987,17 +1026,13 @@ def write_markdown(
 
 def _write_atomic(source_path: Path, data: bytes) -> None:
     """Пишет во временный файл рядом и атомарно подменяет исходник."""
-    descriptor, temp_name = tempfile.mkstemp(
+    temp_path = _write_temp_file(
+        source_path.parent,
         prefix=f".{source_path.name}.",
         suffix=".tmp",
-        dir=source_path.parent,
+        data=data,
     )
-    temp_path = Path(temp_name)
     try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
         shutil.copystat(source_path, temp_path)
         os.replace(temp_path, source_path)
     except BaseException:
@@ -1032,6 +1067,10 @@ def _read_all(descriptor: int) -> bytes:
         if not chunk:
             return b"".join(chunks)
         chunks.append(chunk)
+
+
+def _sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
 
 def _write_file_sync(path: Path, data: bytes) -> None:
@@ -1081,7 +1120,7 @@ def _write_journal(
         "st_ino": inode,
         "st_size": size,
         "st_mtime_ns": mtime_ns,
-        "sha256": hashlib.sha256(data).hexdigest(),
+        "sha256": _sha256_hex(data),
     }
     journal = json.dumps(payload, ensure_ascii=False, indent=2)
     _write_file_sync(journal_path, journal.encode("utf-8"))
@@ -1113,14 +1152,13 @@ def _open_for_writing(path: Path) -> int:
     return os.open(path, flags)
 
 
-def _write_in_place(
+def _prepare_in_place_files(
     source_path: Path,
-    data: bytes,
     *,
     force: bool,
     backup_path: Path | None,
-) -> None:
-    """Пишет в существующий файл, сохраняя inode, с journal и проверкой."""
+) -> tuple[Path, Path]:
+    """Проверяет оставшийся journal и возвращает пути journal и staged-файла."""
     journal_path = _sidecar_path(source_path, "journal")
     staged_path = _sidecar_path(source_path, "new")
     if journal_path.exists():
@@ -1133,7 +1171,27 @@ def _write_in_place(
                 )
             )
         _discard(journal_path, staged_path)
+    return journal_path, staged_path
 
+
+def _written_data_matches(descriptor: int, data: bytes) -> bool:
+    """Сверяет фактически записанные байты с подготовленными."""
+    return _sha256_hex(_read_all(descriptor)) == _sha256_hex(data)
+
+
+def _write_in_place(
+    source_path: Path,
+    data: bytes,
+    *,
+    force: bool,
+    backup_path: Path | None,
+) -> None:
+    """Пишет в существующий файл, сохраняя inode, с journal и проверкой."""
+    journal_path, staged_path = _prepare_in_place_files(
+        source_path,
+        force=force,
+        backup_path=backup_path,
+    )
     descriptor = _open_for_writing(source_path)
     modified = False
     try:
@@ -1156,8 +1214,7 @@ def _write_in_place(
         _write_all(descriptor, data)
         os.ftruncate(descriptor, len(data))
         os.fsync(descriptor)
-        digest = hashlib.sha256(_read_all(descriptor)).hexdigest()
-        if digest != hashlib.sha256(data).hexdigest():
+        if not _written_data_matches(descriptor, data):
             raise WriteError(
                 tr(
                     "write_verify_failed",
@@ -1237,7 +1294,8 @@ def restore_markdown_regions(
     return text
 
 
-def is_remote(url: str) -> bool:
+def is_remote(url: str | None) -> bool:
+    """True для protocol-relative и абсолютных HTTP(S)-ссылок."""
     return url is not None and (
         url.startswith("//") or url.lower().startswith(("http://", "https://"))
     )
@@ -1306,32 +1364,59 @@ class Downloader:
             current = urljoin(current, location)
         raise UrlBlocked(tr("redirect_too_many", limit=MAX_REDIRECTS))
 
+    def _proxy_hint(self) -> str:
+        """Подсказка о недоступном прокси для сетевых ошибок."""
+        if self.proxy_label is None:
+            return ""
+        return tr("proxy_hint", proxy=self.proxy_label)
+
+    def _failure(
+        self,
+        canonical: str,
+        display: str,
+        error: object,
+        *,
+        key: str = "download_failed",
+        hint: str = "",
+    ) -> DownloadOutcome:
+        """Собирает неудачный результат с локализованным сообщением."""
+        return DownloadOutcome(
+            canonical,
+            None,
+            tr(key, url=display, error=error, hint=hint),
+            True,
+        )
+
+    def _store_response(
+        self,
+        response: requests.Response,
+        canonical: str,
+    ) -> str:
+        """Проверяет ответ и сохраняет изображение; возвращает локальный путь."""
+        response.raise_for_status()
+        content_type = content_type_of(response)
+        if content_type not in IMAGE_CONTENT_TYPES:
+            raise DownloadRejected(
+                tr(
+                    "download_wrong_type",
+                    content_type=content_type or tr("content_type_missing"),
+                )
+            )
+        data = read_limited(response, MAX_DOWNLOAD_BYTES)
+        extension = extension_for_content_type(content_type)
+        destination = self.media_dir / filename_for_url(canonical, extension)
+        store_download(self.media_dir, destination, data)
+        return relative_path_for_markdown(destination, self.base_dir)
+
     def _download(
         self, canonical: str, session: requests.Session
     ) -> DownloadOutcome:
         """Скачивает один URL, не трогая счётчики и кэш (это делает вызывающий)."""
         display = self.display_url(canonical)
-        proxy_hint = (
-            tr("proxy_hint", proxy=self.proxy_label) if self.proxy_label else ""
-        )
-        response = None
+        response: requests.Response | None = None
         try:
             response = self.fetch(canonical, session)
-            response.raise_for_status()
-            content_type = content_type_of(response)
-            if content_type not in IMAGE_CONTENT_TYPES:
-                raise DownloadRejected(
-                    tr(
-                        "download_wrong_type",
-                        content_type=content_type or tr("content_type_missing"),
-                    )
-                )
-            data = read_limited(response, MAX_DOWNLOAD_BYTES)
-            extension = extension_for_content_type(content_type)
-            filename = filename_for_url(canonical, extension)
-            destination = self.media_dir / filename
-            store_download(self.media_dir, destination, data)
-            relative = relative_path_for_markdown(destination, self.base_dir)
+            relative = self._store_response(response, canonical)
             return DownloadOutcome(
                 canonical,
                 relative,
@@ -1339,34 +1424,20 @@ class Downloader:
                 False,
             )
         except requests.RequestException as error:
-            return DownloadOutcome(
+            return self._failure(
                 canonical,
-                None,
-                tr(
-                    "download_failed",
-                    url=display,
-                    error=safe_error(error, canonical, verbose=self.verbose),
-                    hint=proxy_hint,
-                ),
-                True,
+                display,
+                safe_error(error, canonical, verbose=self.verbose),
+                hint=self._proxy_hint(),
             )
         except DownloadRejected as error:
-            return DownloadOutcome(
-                canonical,
-                None,
-                tr("download_failed", url=display, error=error, hint=""),
-                True,
-            )
+            return self._failure(canonical, display, str(error))
         except OSError as error:
-            return DownloadOutcome(
+            return self._failure(
                 canonical,
-                None,
-                tr(
-                    "save_failed",
-                    url=display,
-                    error=safe_error(error, canonical, verbose=self.verbose),
-                ),
-                True,
+                display,
+                safe_error(error, canonical, verbose=self.verbose),
+                key="save_failed",
             )
         finally:
             if response is not None:
@@ -1511,6 +1582,33 @@ def _ref_definitions(text: str) -> dict[str, tuple[str, str]]:
     return definitions
 
 
+def _html_attribute_parts(
+    match: re.Match[str],
+) -> tuple[str, str, str, str]:
+    """Возвращает prefix, quote, value и suffix HTML-атрибута src/srcset."""
+    quote = match.group(2)
+    value = match.group(3) if quote else match.group(4)
+    return match.group(1), quote or "", value, match.group(5)
+
+
+def _render_html_attribute(
+    prefix: str,
+    quote: str,
+    value: str,
+    suffix: str,
+) -> str:
+    """Собирает HTML-атрибут обратно, сохраняя исходные кавычки."""
+    if quote:
+        return f"{prefix}{quote}{value}{quote}{suffix}"
+    return f"{prefix}{value}{suffix}"
+
+
+def _format_inline_image(alt: str, local: str, title: str) -> str:
+    """Формирует Markdown-ссылку с необязательным title."""
+    suffix = f" {title}" if title else ""
+    return f"![{alt}]({local}{suffix})"
+
+
 def collect_remote_urls(
     text: str, ref_defs: Mapping[str, tuple[str, str]]
 ) -> list[str]:
@@ -1526,15 +1624,15 @@ def collect_remote_urls(
             urls.append(url)
 
     def add_html_src(match: re.Match[str]) -> None:
-        quote = match.group(2)
-        add(match.group(3) if quote else match.group(4))
+        _, _, value, _ = _html_attribute_parts(match)
+        add(value)
 
     for match in INLINE_IMAGE_RE.finditer(text):
         add(match.group(2) or match.group(3))
     for match in HTML_IMG_RE.finditer(text):
         add_html_src(match)
     for match in HTML_SRCSET_RE.finditer(text):
-        value = match.group(3) if match.group(2) else match.group(4)
+        _, _, value, _ = _html_attribute_parts(match)
         for start, end in srcset_url_spans(value):
             add(value[start:end])
     for picture in PICTURE_RE.finditer(text):
@@ -1548,53 +1646,76 @@ def collect_remote_urls(
     return urls
 
 
-def rewrite(text: str, downloader: Downloader) -> RewriteResult:
-    """Заменяет удалённые ссылки на локальные, не трогая код и комментарии."""
-    protected_text, protected_regions = protect_markdown_regions(text)
-    ref_defs = _ref_definitions(protected_text)
-    # Сначала скачиваем всё параллельно, затем подставляем результаты из кэша.
-    downloader.prefetch(collect_remote_urls(protected_text, ref_defs))
+class _MarkdownRewriter:
+    """Один проход замены ссылок; состояние живёт только внутри вызова."""
 
-    found_urls: set[str] = set()
+    def __init__(self, downloader: Downloader) -> None:
+        self._downloader = downloader
+        self._ref_defs: Mapping[str, tuple[str, str]] = {}
+        self._found_urls: set[str] = set()
+        self._replaced_ref_keys: set[str] = set()
 
-    def replace_inline(match: re.Match[str]) -> str:
+    def rewrite(self, text: str) -> RewriteResult:
+        protected_text, protected_regions = protect_markdown_regions(text)
+        self._ref_defs = _ref_definitions(protected_text)
+        # Сначала скачиваем всё параллельно, затем подставляем результаты из кэша.
+        self._downloader.prefetch(
+            collect_remote_urls(protected_text, self._ref_defs)
+        )
+
+        new_text = INLINE_IMAGE_RE.sub(self._replace_inline, protected_text)
+        new_text = HTML_IMG_RE.sub(self._replace_html_src, new_text)
+        new_text = HTML_SRCSET_RE.sub(self._replace_srcset, new_text)
+        new_text = PICTURE_RE.sub(self._replace_picture, new_text)
+        new_text = REF_IMAGE_RE.sub(self._replace_reference, new_text)
+        new_text = self._drop_used_definitions(new_text)
+        return RewriteResult(
+            restore_markdown_regions(new_text, protected_regions),
+            frozenset(self._found_urls),
+        )
+
+    def _localize(self, url: str) -> str | None:
+        """Возвращает локальный путь или None, если ссылку нужно оставить."""
+        if not is_remote(url):
+            return None
+        self._found_urls.add(canonical_url(url))
+        local = self._downloader.localize(url)
+        return None if local == url else local
+
+    def _replace_inline(self, match: re.Match[str]) -> str:
         alt = match.group(1)
-        url = match.group(2) or match.group(3)
+        url = match.group(2) or match.group(3) or ""
         title = match.group(4) or ""
-        if not is_remote(url):
+        local = self._localize(url)
+        if local is None:
             return match.group(0)
-        found_urls.add(canonical_url(url))
-        local = downloader.localize(url)
-        if local == url:
-            return match.group(0)
-        return f"![{alt}]({local}{' ' + title if title else ''})"
+        return _format_inline_image(alt, local, title)
 
-    def replace_html_src(match: re.Match[str]) -> str:
-        quote = match.group(2)
-        url = match.group(3) if quote else match.group(4)
-        if not is_remote(url):
+    def _replace_html_src(self, match: re.Match[str]) -> str:
+        prefix, quote, value, suffix = _html_attribute_parts(match)
+        local = self._localize(value)
+        if local is None:
             return match.group(0)
-        found_urls.add(canonical_url(url))
-        local = downloader.localize(url)
-        if local == url:
-            return match.group(0)
-        prefix, suffix = match.group(1), match.group(5)
-        if quote:
-            return f"{prefix}{quote}{local}{quote}{suffix}"
-        return f"{prefix}{local}{suffix}"
+        return _render_html_attribute(prefix, quote, local, suffix)
 
-    def rewrite_srcset_value(value: str) -> tuple[str, bool]:
+    def _replace_srcset(self, match: re.Match[str]) -> str:
+        prefix, quote, value, suffix = _html_attribute_parts(match)
+        rewritten, changed = self._rewrite_srcset_value(value)
+        if not changed:
+            return match.group(0)
+        return _render_html_attribute(prefix, quote, rewritten, suffix)
+
+    def _replace_picture(self, match: re.Match[str]) -> str:
+        return HTML_SOURCE_SRC_RE.sub(self._replace_html_src, match.group(0))
+
+    def _rewrite_srcset_value(self, value: str) -> tuple[str, bool]:
         """Переписывает URL в srcset, сохраняя дескрипторы и оформление."""
         pieces: list[str] = []
         last = 0
         changed = False
         for start, end in srcset_url_spans(value):
-            url = value[start:end]
-            if not is_remote(url):
-                continue
-            found_urls.add(canonical_url(url))
-            local = downloader.localize(url)
-            if local == url:
+            local = self._localize(value[start:end])
+            if local is None:
                 continue
             pieces.append(value[last:start])
             pieces.append(local)
@@ -1605,64 +1726,43 @@ def rewrite(text: str, downloader: Downloader) -> RewriteResult:
         pieces.append(value[last:])
         return "".join(pieces), True
 
-    def replace_srcset(match: re.Match[str]) -> str:
-        quote = match.group(2)
-        value = match.group(3) if quote else match.group(4)
-        rewritten, changed = rewrite_srcset_value(value)
-        if not changed:
-            return match.group(0)
-        prefix, suffix = match.group(1), match.group(5)
-        if quote:
-            return f"{prefix}{quote}{rewritten}{quote}{suffix}"
-        return f"{prefix}{rewritten}{suffix}"
-
-    replaced_ref_keys: set[str] = set()
-
-    def replace_ref_image(match: re.Match[str]) -> str:
+    def _replace_reference(self, match: re.Match[str]) -> str:
         alt = match.group(1)
         key = (match.group(2) or alt).lower()
-        definition = ref_defs.get(key)
+        definition = self._ref_defs.get(key)
         if definition is None:
             return match.group(0)
         url, title = definition
-        if not is_remote(url):
+        local = self._localize(url)
+        if local is None:
             return match.group(0)
-        found_urls.add(canonical_url(url))
-        local = downloader.localize(url)
-        if local == url:
-            return match.group(0)
-        replaced_ref_keys.add(key)
-        return f"![{alt}]({local}{' ' + title if title else ''})"
+        self._replaced_ref_keys.add(key)
+        return _format_inline_image(alt, local, title)
 
-    new_text = INLINE_IMAGE_RE.sub(replace_inline, protected_text)
-    new_text = HTML_IMG_RE.sub(replace_html_src, new_text)
-    new_text = HTML_SRCSET_RE.sub(replace_srcset, new_text)
-    new_text = PICTURE_RE.sub(
-        lambda match: HTML_SOURCE_SRC_RE.sub(
-            replace_html_src, match.group(0)
-        ),
-        new_text,
-    )
-    new_text = REF_IMAGE_RE.sub(replace_ref_image, new_text)
+    def _drop_used_definitions(self, text: str) -> str:
+        """Удаляет определения, которые больше не используются в тексте."""
 
-    def drop_used_definitions(match: re.Match[str]) -> str:
-        key = match.group(1).lower()
-        if key not in replaced_ref_keys:
-            return match.group(0)
-        surrounding = new_text[: match.start()] + new_text[match.end():]
-        # Сами определения содержат "[key]:" и не должны считаться использованием.
-        surrounding = REF_DEF_RE.sub("", surrounding)
-        if re.search(
-            r"\[" + re.escape(match.group(1)) + r"\]",
-            surrounding,
-            re.IGNORECASE,
-        ):
-            return match.group(0)
-        return ""
+        def drop(match: re.Match[str]) -> str:
+            key = match.group(1).lower()
+            if key not in self._replaced_ref_keys:
+                return match.group(0)
+            surrounding = text[: match.start()] + text[match.end():]
+            # Сами определения содержат "[key]:" и не должны считаться использованием.
+            surrounding = REF_DEF_RE.sub("", surrounding)
+            if re.search(
+                r"\[" + re.escape(match.group(1)) + r"\]",
+                surrounding,
+                re.IGNORECASE,
+            ):
+                return match.group(0)
+            return ""
 
-    new_text = REF_DEF_RE.sub(drop_used_definitions, new_text)
-    new_text = restore_markdown_regions(new_text, protected_regions)
-    return RewriteResult(new_text, frozenset(found_urls))
+        return REF_DEF_RE.sub(drop, text)
+
+
+def rewrite(text: str, downloader: Downloader) -> RewriteResult:
+    """Заменяет удалённые ссылки на локальные, не трогая код и комментарии."""
+    return _MarkdownRewriter(downloader).rewrite(text)
 
 
 def configure_tls() -> None:
@@ -1773,27 +1873,49 @@ def main() -> int:
     return 2
 
 
-def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+def _validate_options(
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+) -> None:
+    """Проверяет взаимоисключающие опции до любых сетевых операций."""
     if args.no_backup and not args.force and args.write_mode == "in-place":
         parser.error(tr("no_backup_requires_force"))
     if args.jobs < 1 or args.jobs > MAX_DOWNLOAD_WORKERS:
         parser.error(tr("jobs_range"))
 
+
+def _configure_proxy(
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+) -> tuple[str | None, str | None]:
+    """Разбирает и проверяет прокси, возвращая URL и безопасную метку."""
     try:
         proxy = parse_proxy(args.proxy)
         if proxy:
             ensure_socks_support(proxy)
     except ProxyConfigError as error:
         parser.error(str(error))
-
     proxy_label = mask_proxy(proxy) if proxy else None
+    return proxy, proxy_label
 
-    source_path = args.markdown.expanduser().resolve()
+
+def _resolve_source_path(
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+) -> Path:
+    source_path = cast(Path, args.markdown).expanduser().resolve()
     if not source_path.is_file():
         parser.error(tr("file_not_found", path=source_path))
+    return source_path
 
+
+def _resolve_media_dir(
+    args: argparse.Namespace,
+    source_path: Path,
+    parser: argparse.ArgumentParser,
+) -> Path:
     if args.media:
-        media_path = args.media.expanduser()
+        media_path = cast(Path, args.media).expanduser()
         if not media_path.is_absolute():
             # Относительный путь трактуется от заметки, а не от текущего каталога.
             media_path = source_path.parent / media_path
@@ -1802,6 +1924,29 @@ def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         media_dir = source_path.parent / "media"
     if media_dir.exists() and not media_dir.is_dir():
         parser.error(tr("media_not_directory", path=media_dir))
+    return media_dir
+
+
+def _read_markdown_source(
+    source_path: Path,
+    parser: argparse.ArgumentParser,
+) -> tuple[str, str, bytes]:
+    """Читает и декодирует Markdown, сообщая об ошибках через argparse."""
+    try:
+        data = source_path.read_bytes()
+    except OSError as error:
+        parser.error(tr("read_error", path=source_path, error=error))
+    try:
+        return decode_markdown(data)
+    except UnicodeDecodeError as error:
+        parser.error(tr("encoding_error", path=source_path, error=error))
+
+
+def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    _validate_options(args, parser)
+    proxy, proxy_label = _configure_proxy(args, parser)
+    source_path = _resolve_source_path(args, parser)
+    media_dir = _resolve_media_dir(args, source_path, parser)
 
     if proxy_label:
         print(tr("proxy_banner", proxy=proxy_label))
@@ -1821,14 +1966,7 @@ def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
             session_factory=session_factory,
             workers=args.jobs,
         )
-        try:
-            data = source_path.read_bytes()
-        except OSError as error:
-            parser.error(tr("read_error", path=source_path, error=error))
-        try:
-            text, encoding, bom = decode_markdown(data)
-        except UnicodeDecodeError as error:
-            parser.error(tr("encoding_error", path=source_path, error=error))
+        text, encoding, bom = _read_markdown_source(source_path, parser)
         try:
             report = process(
                 args,
@@ -1846,6 +1984,26 @@ def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         session.close()
 
 
+def _create_backup(
+    args: argparse.Namespace,
+    source_path: Path,
+) -> Path | None:
+    """Создаёт .orig при необходимости и печатает сообщения о ротации."""
+    if args.no_backup:
+        return None
+    backup_path, rotated_path = make_backup(source_path, args.force)
+    if rotated_path is not None:
+        print(
+            tr(
+                "backup_rotated",
+                backup=backup_path.name,
+                path=rotated_path.name,
+            )
+        )
+    print(tr("backup", source=source_path.name, backup=backup_path.name))
+    return backup_path
+
+
 def process(
     args: argparse.Namespace,
     source_path: Path,
@@ -1855,19 +2013,7 @@ def process(
     bom: bytes,
 ) -> RunReport:
     result = rewrite(text, downloader)
-
-    backup_path: Path | None = None
-    if not args.no_backup:
-        backup_path, rotated_path = make_backup(source_path, args.force)
-        if rotated_path is not None:
-            print(
-                tr(
-                    "backup_rotated",
-                    backup=backup_path.name,
-                    path=rotated_path.name,
-                )
-            )
-        print(tr("backup", source=source_path.name, backup=backup_path.name))
+    backup_path = _create_backup(args, source_path)
     write_markdown(
         source_path,
         encode_markdown(result.text, encoding, bom),
